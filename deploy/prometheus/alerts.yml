@@ -1,0 +1,137 @@
+groups:
+  - name: serviceability-critical
+    rules:
+      # The most important alert in the system. A high routing failure rate
+      # means operations users are seeing ROUTE_CALCULATION_ERROR and cannot
+      # qualify customers. It is NOT causing wrong rejections -- the engine
+      # never turns a provider failure into NOT_AVAILABLE -- but it is a
+      # work stoppage.
+      - alert: RoutingProviderFailureRateHigh
+        expr: |
+          sum(rate(provider_requests_total{operation="distance_matrix",outcome!="success"}[5m]))
+          /
+          clamp_min(sum(rate(provider_requests_total{operation="distance_matrix"}[5m])), 0.001)
+          > 0.20
+        for: 5m
+        labels:
+          severity: critical
+          runbook: docs/06-rollback-runbook.md#routing-provider-failure
+        annotations:
+          summary: "Over 20% of routing calls are failing"
+          description: >
+            Serviceability checks are returning ROUTE_CALCULATION_ERROR. Customers
+            are not being wrongly rejected, but operations cannot qualify anyone.
+            Check the Google Maps quota and the provider status page.
+
+      - alert: RoutingCircuitBreakerOpen
+        expr: provider_circuit_state > 1
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Routing circuit breaker is open for {{ $labels.provider }}"
+          description: >
+            Repeated failures have tripped the breaker. All checks return
+            ROUTE_CALCULATION_ERROR until it half-opens.
+
+      - alert: BackendDown
+        expr: up{job="serviceability-backend"} == 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Serviceability backend is not being scraped"
+
+      - alert: NoServiceabilityChecksDuringBusinessHours
+        expr: |
+          sum(increase(serviceability_checks_total[30m])) == 0
+          and on() (hour() >= 3 < 13)
+        for: 30m
+        labels:
+          severity: warning
+        annotations:
+          summary: "No serviceability checks in 30 minutes during Chennai business hours"
+          description: >
+            Hours are expressed in UTC; 03:00-13:00 UTC is roughly 08:30-18:30 IST.
+            Either nobody is using the system or something upstream is broken.
+
+  - name: serviceability-warning
+    rules:
+      - alert: GeocodingFailureSpike
+        expr: |
+          sum(rate(geocoding_results_total{outcome=~"no_result|error"}[10m]))
+          /
+          clamp_min(sum(rate(geocoding_results_total[10m])), 0.001)
+          > 0.30
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Over 30% of geocoding attempts are failing"
+          description: >
+            Customers are piling up in LOCATION_VERIFICATION_REQUIRED and need
+            manual marker placement. Check the Geocoding API quota.
+
+      - alert: ServiceabilityCheckLatencyHigh
+        expr: histogram_quantile(0.95, sum(rate(serviceability_duration_seconds_bucket[5m])) by (le)) > 5
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "95th percentile serviceability check is over 5 seconds"
+          description: >
+            Target is a result within a few seconds (brief section 24). Check
+            routing provider latency and the PostGIS candidate query plan.
+
+      - alert: RouteCacheHitRateLow
+        expr: |
+          sum(rate(route_cache_events_total{event="hit"}[1h]))
+          /
+          clamp_min(sum(rate(route_cache_events_total{event=~"hit|miss"}[1h])), 0.001)
+          < 0.20
+        for: 1h
+        labels:
+          severity: warning
+        annotations:
+          summary: "Route cache hit rate below 20%"
+          description: >
+            Every miss is a billed routing element. Check that Redis is reachable
+            and that ROUTE_CACHE_TTL_SECONDS has not been set too low.
+
+      - alert: RoutingElementSpendSpike
+        expr: sum(increase(provider_elements_total[1h])) > 5000
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Over 5000 routing matrix elements in the last hour"
+          description: >
+            Google bills Distance Matrix per element. Verify CANDIDATE_MAX_COUNT
+            and check for a runaway loop or an unexpected bulk operation.
+
+      - alert: NotAvailableRateUnusuallyHigh
+        expr: |
+          sum(rate(serviceability_checks_total{result="NOT_AVAILABLE"}[1h]))
+          /
+          clamp_min(sum(rate(serviceability_checks_total{result=~"AVAILABLE|NOT_AVAILABLE"}[1h])), 0.001)
+          > 0.80
+        for: 1h
+        labels:
+          severity: warning
+        annotations:
+          summary: "Over 80% of decisions are NOT_AVAILABLE"
+          description: >
+            Could be genuine (sales prospecting outside coverage), or could mean
+            service locations were deactivated, an import went wrong, or the
+            threshold was changed. Check the config audit trail first.
+
+      - alert: NoLiveDashboardConnections
+        expr: sse_connections == 0
+        for: 30m
+        labels:
+          severity: info
+        annotations:
+          summary: "No dashboards are connected to the live stream"
+          description: >
+            Expected outside working hours. During the day it may mean Redis
+            pub/sub or the SSE proxy path is broken.

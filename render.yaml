@@ -1,0 +1,86 @@
+databases:
+  - name: chennai-svc-db
+    databaseName: serviceability
+    user: serviceability
+    plan: free
+    postgresMajorVersion: "16"
+
+services:
+  - type: web
+    name: chennai-svc-backend
+    runtime: docker
+    dockerContext: backend
+    dockerfilePath: backend/Dockerfile
+    plan: free
+    healthCheckPath: /health
+    envVars:
+      - key: ENVIRONMENT
+        value: qa
+      - key: DEBUG
+        value: "false"
+      - key: ENABLE_API_DOCS
+        value: "false"
+      - key: FORCE_HTTPS
+        value: "true"
+      - key: LOG_FORMAT
+        value: json
+      - key: SECRET_KEY
+        generateValue: true
+      - key: BOOTSTRAP_ADMIN_USERNAME
+        value: admin
+      - key: BOOTSTRAP_ADMIN_EMAIL
+        value: ops@example.com
+      - key: BOOTSTRAP_ADMIN_PASSWORD
+        generateValue: true
+      - key: RUN_SEED_ON_START
+        value: "true"
+      - key: SEED_ARGS
+        value: --demo
+      - key: ROUTING_PROVIDER
+        value: fake
+      - key: GEOCODING_PROVIDER
+        value: photon
+      # No Redis is provisioned here -- every cache/rate-limit/live-event path
+      # in this codebase degrades to a no-op when Redis is unreachable (see
+      # app/services/cache.py, app/services/events.py), so pointing this at a
+      # nothing-listens-here address costs nothing but the live dashboard
+      # auto-refresh and route caching. Add a Render Key Value instance and
+      # point this at its connection string if you want those back.
+      - key: REDIS_URL
+        value: redis://localhost:6379/0
+      - key: POSTGRES_HOST
+        fromDatabase: { name: chennai-svc-db, property: host }
+      - key: POSTGRES_PORT
+        fromDatabase: { name: chennai-svc-db, property: port }
+      - key: POSTGRES_USER
+        fromDatabase: { name: chennai-svc-db, property: user }
+      - key: POSTGRES_PASSWORD
+        fromDatabase: { name: chennai-svc-db, property: password }
+      - key: POSTGRES_DB
+        fromDatabase: { name: chennai-svc-db, property: database }
+      # Set these two AFTER the first deploy, once Render has assigned the
+      # actual service URLs (a chosen `name:` above isn't guaranteed to be the
+      # live hostname if it collides with an existing global name on Render).
+      # CORS_ORIGINS = the frontend's URL, e.g. https://chennai-svc-frontend.onrender.com
+      # TRUSTED_HOSTS is only enforced when ENVIRONMENT=production, so it's
+      # inert here (see app/main.py) -- left blank on purpose.
+      - key: CORS_ORIGINS
+        sync: false
+
+  - type: web
+    name: chennai-svc-frontend
+    runtime: static
+    rootDir: frontend
+    buildCommand: npm ci && npm run build
+    staticPublishPath: dist
+    envVars:
+      # Set this AFTER the first deploy to the backend's actual URL, e.g.
+      # https://chennai-svc-backend.onrender.com/api/v1 -- then trigger a
+      # manual redeploy of this static site (it's a build-time value, baked
+      # into the bundle, so changing the env var alone does not take effect).
+      - key: VITE_API_BASE_URL
+        sync: false
+    routes:
+      - type: rewrite
+        source: /*
+        destination: /index.html

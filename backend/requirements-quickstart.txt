@@ -1,0 +1,31 @@
+# Quickstart dependencies — the no-Docker path only.
+#
+# This is requirements.txt minus the PostgreSQL drivers (asyncpg, psycopg2-binary),
+# which are the two packages most likely to fail to build on Windows and are not
+# needed when running against SQLite. The application never imports them at
+# startup; they are loaded by SQLAlchemy only when a postgresql:// URL is used.
+#
+#   pip install -r requirements-quickstart.txt
+#
+# For the real deployment use requirements.txt (Docker installs it for you).
+
+fastapi==0.115.6
+uvicorn[standard]==0.34.0
+pydantic==2.10.4
+pydantic-settings==2.7.0
+sqlalchemy==2.0.36
+geoalchemy2==0.16.0
+alembic==1.14.0
+aiosqlite==0.20.0
+redis==5.2.1
+httpx==0.28.1
+openlocationcode==1.0.1
+python-jose[cryptography]==3.3.0
+bcrypt==4.2.1
+python-multipart==0.0.20
+email-validator==2.2.0
+openpyxl==3.1.5
+pandas==2.2.3
+reportlab==4.2.5
+prometheus-client==0.21.1
+structlog==24.4.0

@@ -1,0 +1,78 @@
+CHENNAI SERVICEABILITY - START HERE
+===================================
+
+You cannot run the .zip file directly. A zip is a compressed folder, not a
+program. There is also no .exe to double-click: this is a web application,
+so it needs two free tools installed first (Python and Node.js), and then it
+runs in your browser.
+
+Three steps.
+
+
+STEP 1 - EXTRACT THE ZIP
+------------------------
+Right-click chennai-serviceability.zip, choose "Extract All...", then
+"Extract". Do not just double-click the zip to peek inside - Windows shows
+you the contents without actually unpacking them, and nothing will work.
+
+
+STEP 2 - RUN THE LAUNCHER
+-------------------------
+Open the extracted folder, then the "serviceability" folder inside it, and
+double-click:
+
+    START-HERE-Windows.bat
+
+It checks what you have, tells you exactly what to install if anything is
+missing, sets everything up inside this folder, and opens the app in your
+browser.
+
+First run takes about 5 minutes and downloads roughly 300 MB. After that it
+starts in seconds.
+
+If Windows shows a blue "Windows protected your PC" box, click "More info"
+then "Run anyway". That warning appears for any script downloaded from the
+internet, not because anything is wrong with this one. You can read the whole
+file in Notepad first if you would like to check.
+
+
+STEP 3 - SIGN IN
+----------------
+The browser opens at  http://localhost:5173
+
+    Username    admin
+    Password    demo-password-1234
+
+Two windows will have opened behind your browser. LEAVE THEM OPEN - they are
+the application. Closing them stops it.
+
+To stop the app, close those two windows.
+To start it again later, double-click START-HERE-Windows.bat again.
+
+
+TWO THINGS THAT LOOK BROKEN BUT ARE NOT
+---------------------------------------
+The map may be blank behind the coloured markers. That happens when your
+network cannot reach the OpenStreetMap tile servers. Pins, routes and popups
+all still work.
+
+The pill in the top-right may say "Reconnecting". Live updates between users
+need Redis, which this quick setup does not run. Nothing else is affected.
+
+
+IMPORTANT - THE DISTANCES ARE NOT REAL YET
+------------------------------------------
+This setup uses a stand-in routing provider that estimates road distance from
+straight-line distance. Every screen, every rule and every audit record is
+real, but the distances are not actual Chennai roads. Do not make business
+decisions from them.
+
+For real road distances you need Docker Desktop and a Google Maps Platform
+key. See docs/05-deployment-runbook.md.
+
+
+IF SOMETHING GOES WRONG
+-----------------------
+The launcher prints what to do for each failure it can detect. For anything
+else, docs/ has the full documentation, and the Windows walkthrough covers
+the six problems that actually come up.

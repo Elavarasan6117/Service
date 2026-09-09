@@ -1,0 +1,8 @@
+Customer ID,Customer Name,Address,Area,City,Pincode,Latitude,Longitude,Service Area,Route,Status
+C101,Sri Foods,"12, Second Avenue, Anna Nagar",Anna Nagar,Chennai,600040,13.0851230,80.2103450,Anna Nagar,RT-NORTH-01,ACTIVE
+C102,New Traders,"44, Thanikachalam Road, T. Nagar",T. Nagar,Chennai,600017,13.0417800,80.2340900,T. Nagar,RT-CENTRAL-03,ACTIVE
+C103,Royal Provisions,"8, Lattice Bridge Road, Adyar",Adyar,Chennai,600020,13.0066500,80.2570200,Adyar,RT-SOUTH-02,ACTIVE
+C104,Star Supermarket,"91, Velachery Main Road",Velachery,Chennai,600042,12.9756400,80.2206800,Velachery,RT-SOUTH-03,ACTIVE
+C105,Anand Bakery,"3, Mount Road, Guindy",Guindy,Chennai,600032,13.0067100,80.2205900,Guindy,RT-SOUTH-04,ACTIVE
+C106,Kumar Agencies,"17, Arcot Road, Vadapalani",Vadapalani,Chennai,600026,,,Vadapalani,RT-WEST-02,ACTIVE
+C107,Chennai Sweets,"56, Poonamallee High Road, Kilpauk",Kilpauk,Chennai,600010,13.0780300,80.2410700,Kilpauk,RT-CENTRAL-01,INACTIVE
