@@ -79,6 +79,27 @@ BUSINESS_TYPES = [
 ]
 
 
+def _build_area_prefixes() -> dict[str, str]:
+    """3-character service-code prefix per area, disambiguated so two areas
+    never collide -- a plain area[:3] gives "Perambur" and "Perungudi" the
+    same "PER" prefix, which corrupts every service_code past that point."""
+    used: set[str] = set()
+    prefixes: dict[str, str] = {}
+    for area, _, _, _ in CHENNAI_AREAS:
+        base = "".join(ch for ch in area.upper() if ch.isalpha())[:3]
+        candidate = base
+        suffix = 1
+        while candidate in used:
+            candidate = f"{base[:2]}{suffix}"
+            suffix += 1
+        used.add(candidate)
+        prefixes[area] = candidate
+    return prefixes
+
+
+AREA_PREFIXES = _build_area_prefixes()
+
+
 async def seed_admin(session) -> User:
     result = await session.execute(
         select(User).where(User.username == settings.BOOTSTRAP_ADMIN_USERNAME)
@@ -168,7 +189,7 @@ async def seed_service_locations(session, warehouse, routes, count: int) -> int:
             # commercial density rather than an evenly spaced lattice.
             jitter_lat = rng.gauss(0, 0.010)
             jitter_lng = rng.gauss(0, 0.010)
-            code = f"SRV-{area[:3].upper()}-{i + 1:03d}"
+            code = f"SRV-{AREA_PREFIXES[area]}-{i + 1:03d}"
             session.add(
                 ServiceLocation(
                     service_code=code,
