@@ -217,11 +217,16 @@ async def dashboard_metrics(
         .where(*checks_today, ServiceabilityCheck.cache_hit.is_(True))
     )
 
+    # Built once and reused in both select() and group_by(): two separate
+    # func.coalesce(...) calls compile to two distinct bind parameters even
+    # though they're textually identical, and Postgres (unlike SQLite) then
+    # rejects the query as grouping on an expression absent from the SELECT.
+    area_expr = func.coalesce(Customer.area, "Unspecified")
     by_area_rows = (
         await session.execute(
-            select(func.coalesce(Customer.area, "Unspecified"), func.count())
+            select(area_expr, func.count())
             .where(Customer.created_at >= day_start, Customer.created_at < day_end)
-            .group_by(func.coalesce(Customer.area, "Unspecified"))
+            .group_by(area_expr)
             .order_by(func.count().desc())
             .limit(25)
         )
