@@ -226,6 +226,10 @@ export function DashboardPage({
     [activeCustomer],
   )
 
+  // Preview checks (no linked customer) are permanent audit history, but not
+  // relevant to show alongside live customer activity on this dashboard.
+  const linkedChecks = checks.filter((check) => check.customerId)
+
   return (
     <div className="layout">
       {/* ---------------- Left column ---------------- */}
@@ -391,7 +395,12 @@ export function DashboardPage({
             </button>
           </div>
           <div className="card__body card__body--flush">
-            {checks.length === 0 ? (
+            {/* Preview checks (no linked customer -- either a plain address
+                lookup, or a customer that was since deleted) are permanent
+                audit history, but not useful to show alongside live customer
+                activity here. They're never removed from the database, only
+                from this particular list. */}
+            {linkedChecks.length === 0 ? (
               <div className="empty">No serviceability checks recorded yet.</div>
             ) : (
               <div className="table-wrap">
@@ -409,7 +418,7 @@ export function DashboardPage({
                     </tr>
                   </thead>
                   <tbody>
-                    {checks.map((check) => (
+                    {linkedChecks.map((check) => (
                       <tr key={check.id}>
                         <td className="subtle">
                           {new Date(check.createdAt).toLocaleTimeString([], {
@@ -436,24 +445,15 @@ export function DashboardPage({
                         <td className="subtle">{check.createdByLabel}</td>
                         {canDeleteChecks && (
                           <td>
-                            {check.customerId ? (
-                              <button
-                                type="button"
-                                className="btn btn--secondary btn--sm"
-                                onClick={() => void deleteCheck(check.id)}
-                                title="Delete the customer and its map marker"
-                                aria-label={`Delete customer ${check.customerName ?? ''}`}
-                              >
-                                Delete
-                              </button>
-                            ) : (
-                              <span
-                                className="subtle"
-                                title="A preview check has no customer to delete -- serviceability history is append-only."
-                              >
-                                —
-                              </span>
-                            )}
+                            <button
+                              type="button"
+                              className="btn btn--secondary btn--sm"
+                              onClick={() => void deleteCheck(check.id)}
+                              title="Delete the customer and its map marker"
+                              aria-label={`Delete customer ${check.customerName ?? ''}`}
+                            >
+                              Delete
+                            </button>
                           </td>
                         )}
                       </tr>
