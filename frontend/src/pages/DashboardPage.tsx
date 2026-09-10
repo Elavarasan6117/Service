@@ -436,15 +436,24 @@ export function DashboardPage({
                         <td className="subtle">{check.createdByLabel}</td>
                         {canDeleteChecks && (
                           <td>
-                            <button
-                              type="button"
-                              className="btn btn--secondary btn--sm"
-                              onClick={() => void deleteCheck(check.id)}
-                              title="Delete serviceability check"
-                              aria-label={`Delete check for ${check.customerName ?? 'preview'}`}
-                            >
-                              Delete
-                            </button>
+                            {check.customerId ? (
+                              <button
+                                type="button"
+                                className="btn btn--secondary btn--sm"
+                                onClick={() => void deleteCheck(check.id)}
+                                title="Delete the customer and its map marker"
+                                aria-label={`Delete customer ${check.customerName ?? ''}`}
+                              >
+                                Delete
+                              </button>
+                            ) : (
+                              <span
+                                className="subtle"
+                                title="A preview check has no customer to delete -- serviceability history is append-only."
+                              >
+                                —
+                              </span>
+                            )}
                           </td>
                         )}
                       </tr>

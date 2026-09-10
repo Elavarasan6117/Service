@@ -5,13 +5,13 @@ import uuid
 from datetime import datetime
 
 from fastapi import APIRouter, Depends, Query
-from sqlalchemy import delete, func, select
+from sqlalchemy import func, select
 from sqlalchemy.orm import selectinload
 
 from app.api.deps import DbSession, EngineDep, require
 from app.api.v1.mappers import check_to_response, outcome_to_response
 from app.core.enums import CheckResult, Permission
-from app.core.errors import GeocodingError, NotFoundError
+from app.core.errors import GeocodingError, NotFoundError, ValidationError
 from app.models.serviceability_check import ServiceabilityCheck
 from app.models.customer import Customer
 from app.providers.registry import get_geocoding_provider
@@ -100,28 +100,29 @@ async def delete_check(
     session: DbSession,
     user: User = Depends(require(Permission.AUDIT_DELETE)),
 ) -> MessageResponse:
-    """Remove a selected check and its customer marker when applicable."""
+    """Remove a customer and its map marker. The check itself is preserved.
+
+    serviceability_checks is append-only -- a DB trigger (0001 migration)
+    rejects any UPDATE or DELETE against it outright, so this never touches
+    that table directly. Deleting the linked customer instead relies on its
+    ON DELETE SET NULL foreign key to unlink the customer's checks, which
+    both removes the map marker and keeps every historic decision intact.
+    """
     check = await session.get(ServiceabilityCheck, check_id)
     if check is None:
         raise NotFoundError(f"No serviceability check with id {check_id}.")
 
-    if check.customer_id is not None:
-        customer_id = check.customer_id
-        # A customer-linked task represents the map marker. Remove its related
-        # checks as well so the deleted customer cannot leave orphaned history
-        # rows looking like active work.
-        await session.execute(
-            delete(ServiceabilityCheck).where(
-                ServiceabilityCheck.customer_id == customer_id
-            )
+    if check.customer_id is None:
+        raise ValidationError(
+            "This check has no linked customer, so it cannot be removed -- "
+            "serviceability_checks is append-only by design."
         )
-        customer = await session.get(Customer, customer_id)
-        if customer is not None:
-            await session.delete(customer)
-    else:
-        await session.delete(check)
+
+    customer = await session.get(Customer, check.customer_id)
+    if customer is not None:
+        await session.delete(customer)
     await session.commit()
-    return MessageResponse(message="Serviceability check and map customer deleted.")
+    return MessageResponse(message="Customer and its map marker deleted.")
 
 
 @router.post("/preview", response_model=ServiceabilityResultOut)
