@@ -104,12 +104,12 @@ class SpatialSearchService:
                 sl.latitude::float8  AS latitude,
                 sl.longitude::float8 AS longitude,
                 sl.service_area,
-                ST_Distance(sl.location, :origin::geography) AS straight_line_meters
+                ST_Distance(sl.location, :origin ::geography) AS straight_line_meters
             FROM service_locations sl
             WHERE sl.status = :active_status
               AND sl.location IS NOT NULL
-              AND ST_DWithin(sl.location, :origin::geography, :radius)
-            ORDER BY sl.location <-> :origin::geography
+              AND ST_DWithin(sl.location, :origin ::geography, :radius)
+            ORDER BY sl.location <-> :origin ::geography
             LIMIT :limit
             """
         ).bindparams(
