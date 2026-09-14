@@ -11,6 +11,7 @@ OSM Nominatim endpoint.
 
 from __future__ import annotations
 
+import asyncio
 import re
 from typing import Any
 
@@ -269,20 +270,37 @@ class PhotonProvider:
         last_exception: Exception | None = None
         any_clean_response = False
 
-        for query in dict.fromkeys(queries):
-            try:
-                # More than one candidate per query: Photon's own top hit is
-                # ranked on free-text relevance alone, which has no idea that
-                # (for example) "Greams Road" in the original address should
-                # prefer one same-named branch of a hospital chain over
-                # another. Scoring every candidate against the *whole*
-                # address lets a lower-ranked-by-Photon result still win here.
-                results = await self._search(query, limit=5)
-            except Exception as exc:  # noqa: BLE001 - one bad candidate must not sink the rest
-                logger.warning("photon_query_failed", query=query, error=str(exc))
-                last_exception = exc
+        # Every query variant is independent -- run them with bounded
+        # concurrency rather than one at a time. Corporate-suffix stripping
+        # roughly doubles the variant count on top of the existing
+        # leading/middle/reversed fallbacks, and awaiting each sequentially
+        # (a real regression caught live: one address took 25+ seconds and
+        # hit Render's own gateway timeout) defeats the whole point of
+        # dropping the early-exit for correctness. Firing all of them at once
+        # is no better -- Photon's public instance rate-limits a burst that
+        # size and starts returning 503s for most of them (also caught live:
+        # latency dropped to under 3s, but most queries failed and a bad
+        # fallback candidate won). A small semaphore keeps wall-clock time
+        # low without looking like abuse to Photon's own throttling.
+        semaphore = asyncio.Semaphore(4)
+
+        async def _bounded_search(q: str) -> list[dict[str, Any]]:
+            async with semaphore:
+                return await self._search(q, limit=5)
+
+        unique_queries = list(dict.fromkeys(queries))
+        responses = await asyncio.gather(
+            *(_bounded_search(q) for q in unique_queries),
+            return_exceptions=True,
+        )
+
+        for query, outcome in zip(unique_queries, responses):
+            if isinstance(outcome, BaseException):
+                logger.warning("photon_query_failed", query=query, error=str(outcome))
+                last_exception = outcome
                 continue
             any_clean_response = True
+            results = outcome
             if not results:
                 continue
 
