@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 
+from sqlalchemy import event
 from sqlalchemy.ext.asyncio import (
     AsyncEngine,
     AsyncSession,
@@ -26,14 +27,24 @@ def get_engine() -> AsyncEngine:
             "pool_pre_ping": True,  # survives a Postgres restart or idle timeout
             "future": True,
         }
+        is_sqlite = settings.database_url.startswith("sqlite")
         # SQLite (used by the test suite) does not support connection pooling args.
-        if not settings.database_url.startswith("sqlite"):
+        if not is_sqlite:
             kwargs.update(
                 pool_size=settings.DB_POOL_SIZE,
                 max_overflow=settings.DB_MAX_OVERFLOW,
                 pool_recycle=1800,
             )
         _engine = create_async_engine(settings.database_url, **kwargs)
+        if is_sqlite:
+            # Off by default in SQLite (unlike Postgres, where it's always
+            # enforced) -- without this, an ondelete="SET NULL" foreign key
+            # silently does nothing, which let a real bug (delete_check
+            # relying on that cascade) pass locally while still being wrong.
+            @event.listens_for(_engine.sync_engine, "connect")
+            def _enable_sqlite_fk(dbapi_connection, _connection_record) -> None:
+                dbapi_connection.execute("PRAGMA foreign_keys=ON")
+
     return _engine
 
 

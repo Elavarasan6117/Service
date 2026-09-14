@@ -19,7 +19,12 @@ import httpx
 from app.core.config import settings
 from app.core.errors import GeocodingNoResultError
 from app.core.logging import get_logger
-from app.providers.base import AddressSuggestion, GeocodeResult, is_latin_text
+from app.providers.base import (
+    AddressSuggestion,
+    GeocodeResult,
+    is_latin_text,
+    normalize_for_matching,
+)
 
 logger = get_logger(__name__)
 
@@ -38,7 +43,6 @@ _TYPE_RANK = {
     "state": 6,
     "country": 2,
 }
-_GOOD_ENOUGH_RANK = 26
 
 
 class PhotonProvider:
@@ -169,7 +173,7 @@ class PhotonProvider:
         else:
             trailing_drop = 0
         distinctive_parts = [
-            p.strip()
+            normalize_for_matching(p)
             for p in (non_numeric_parts[:-trailing_drop] if trailing_drop else non_numeric_parts)
             if len(p.strip()) > 2
         ]
@@ -180,12 +184,16 @@ class PhotonProvider:
                 target_postcode is not None
                 and properties.get("postcode") == target_postcode
             )
-            display = self._display(properties).lower()
+            # Normalized the same way as distinctive_parts above, so "Ganga
+            # Medical Centre & Hospitals Pvt Ltd" (typed) matches OSM's own
+            # "Ganga Medical Centre and Hospitals Pvt. Ltd" -- a raw
+            # substring check treats those as unrelated text.
+            display = normalize_for_matching(self._display(properties))
             # COUNT how many distinctive parts show up, not just whether any
             # do -- two different places can share one name, and a candidate
             # explaining only one of several distinctive words is much weaker
             # evidence than one explaining all of them.
-            match_count = sum(1 for p in distinctive_parts if p.lower() in display)
+            match_count = sum(1 for p in distinctive_parts if p in display)
             plausible = (
                 postcode_ok or match_count > 0 or not (target_postcode or distinctive_parts)
             )
@@ -211,8 +219,16 @@ class PhotonProvider:
             candidate_score = score(candidate)
             if candidate_score > best_score:
                 best, best_score = candidate, candidate_score
-            if best_score[0] and best_score[2] >= _GOOD_ENOUGH_RANK:
-                break
+            # No early exit: a fallback query that drops down to one bare,
+            # generic word (e.g. "Mettupalayam Road" alone) can trivially
+            # satisfy "plausible + decent type rank" by matching a
+            # same-named street in an entirely different town, well before
+            # the query variant carrying the actual business/landmark name
+            # is ever tried. Photon is free and fast enough that evaluating
+            # every fallback query and keeping the true best-scoring one is
+            # worth the extra requests -- this is exactly the bug that sent
+            # "Ganga Medical Centre ..., Coimbatore" to a same-postcode
+            # government office instead of the actual hospital.
 
         if best is None:
             if not any_clean_response and last_exception is not None:

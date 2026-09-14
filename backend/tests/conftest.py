@@ -27,6 +27,7 @@ os.environ.setdefault("LOG_LEVEL", "WARNING")
 import pytest  # noqa: E402
 import pytest_asyncio  # noqa: E402
 from httpx import ASGITransport, AsyncClient  # noqa: E402
+from sqlalchemy import event  # noqa: E402
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine  # noqa: E402
 from sqlalchemy.pool import StaticPool  # noqa: E402
 
@@ -96,6 +97,15 @@ async def engine():
         connect_args={"check_same_thread": False},
         poolclass=StaticPool,
     )
+
+    # Off by default in SQLite (unlike Postgres, where it's always
+    # enforced) -- without this, an ondelete="SET NULL" foreign key silently
+    # does nothing, which would let a real bug relying on that cascade pass
+    # here while still being wrong in production.
+    @event.listens_for(eng.sync_engine, "connect")
+    def _enable_sqlite_fk(dbapi_connection, _connection_record) -> None:
+        dbapi_connection.execute("PRAGMA foreign_keys=ON")
+
     async with eng.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
     yield eng
