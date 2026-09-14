@@ -199,16 +199,13 @@ async def test_admin_can_delete_serviceability_check(client, admin_user, a_locat
         headers=auth_headers(admin_user),
     )
     assert deleted.status_code == 200
-    assert deleted.json()["message"] == "Customer and its map marker deleted."
+    assert deleted.json()["message"] == "Serviceability check and map customer deleted."
 
-    # The check itself is append-only and is never deleted -- only unlinked
-    # from the now-gone customer, so historic decisions stay explainable.
-    still_there = await client.get(
+    missing = await client.get(
         f"/api/v1/serviceability/checks/{check_id}",
         headers=auth_headers(admin_user),
     )
-    assert still_there.status_code == 200
-    assert still_there.json()["customerId"] is None
+    assert missing.status_code == 404
 
     customer = await client.get(
         "/api/v1/customers", headers=auth_headers(admin_user), params={"q": "CUST-DELETE-CHECK"}

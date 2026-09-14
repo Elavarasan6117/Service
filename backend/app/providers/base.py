@@ -7,7 +7,6 @@ is what makes "do not hard-code the application tightly to one provider"
 
 from __future__ import annotations
 
-import re
 import unicodedata
 from dataclasses import dataclass, field
 from typing import Protocol, runtime_checkable
@@ -162,19 +161,3 @@ def is_latin_text(text: str) -> bool:
         if char.isalpha() and "LATIN" not in unicodedata.name(char, ""):
             return False
     return True
-
-
-def normalize_for_matching(text: str) -> str:
-    """Collapse superficial spelling differences that would otherwise make an
-    address-matching substring check fail even though a human reader would
-    call the two strings the same place: "&" vs "and", "Pvt. Ltd." vs
-    "Pvt Ltd", extra punctuation, repeated whitespace, case.
-
-    Seen in practice: a user-typed "Ganga Medical Centre & Hospitals Pvt
-    Ltd" failed to match OSM's own "Ganga Medical Centre and Hospitals Pvt.
-    Ltd" for exactly this reason, so a same-postcode government office won
-    the match instead of the actual hospital.
-    """
-    text = text.lower().replace("&", " and ")
-    text = re.sub(r"[.,]", " ", text)
-    return re.sub(r"\s+", " ", text).strip()
