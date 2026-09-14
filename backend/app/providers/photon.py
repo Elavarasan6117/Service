@@ -32,35 +32,6 @@ logger = get_logger(__name__)
 # plays the same role here: higher = more specific. "other" is a named POI
 # (a park, hospital, business, ...) via osm_key/osm_value, and is generally as
 # specific as a house number.
-_CORPORATE_SUFFIX_RE = re.compile(
-    r"\b(pvt\.?\s*ltd\.?|private\s+limited|ltd\.?|limited|inc\.?|llp)\.?\b",
-    re.IGNORECASE,
-)
-
-
-def _stem(word: str) -> str:
-    """Crude plural strip ("Hospitals" -> "Hospital") so a same-brand
-    candidate tagged with the singular form in OSM doesn't lose a name-match
-    tie purely on pluralization -- not real stemming, just enough to stop
-    that one common mismatch from deciding a result."""
-    if len(word) > 4 and word.endswith("s") and not word.endswith("ss"):
-        return word[:-1]
-    return word
-
-
-def _strip_corporate_suffix(text: str) -> str:
-    """Drop "Pvt Ltd" / "Private Limited" / etc.
-
-    Near-universal boilerplate across Indian business names -- Photon's
-    free-text ranking treats it as an ordinary matching word, which dilutes
-    relevance enough that the actual distinctive name in a query like
-    "Apollo Hospitals Pvt. Ltd." can fail to surface at all versus some
-    unrelated "... Pvt Ltd." on the same road.
-    """
-    stripped = _CORPORATE_SUFFIX_RE.sub("", text)
-    return re.sub(r"\s+", " ", stripped).strip(" ,")
-
-
 _TYPE_RANK = {
     "house": 30,
     "other": 28,
@@ -183,15 +154,6 @@ class PhotonProvider:
                 )
             queries.extend(reversed(parts))
 
-        # Retry every fallback above with corporate boilerplate stripped, so
-        # a diluted match doesn't crowd out the real one (see
-        # _strip_corporate_suffix).
-        queries.extend(
-            stripped
-            for q in list(queries)
-            if (stripped := _strip_corporate_suffix(q)) and stripped != q
-        )
-
         pincode_match = re.search(r"\b(\d{6})\b", cleaned)
         target_postcode = pincode_match.group(1) if pincode_match else None
         non_numeric_parts = [p for p in parts if not p.strip().isdigit()]
@@ -215,22 +177,8 @@ class PhotonProvider:
             for p in (non_numeric_parts[:-trailing_drop] if trailing_drop else non_numeric_parts)
             if len(p.strip()) > 2
         ]
-        # A named business/landmark conventionally leads an Indian address
-        # ("Apollo Hospitals Pvt Ltd, Greams Road, Chennai"), and is exactly
-        # the part a whole-phrase substring check is too rigid to match --
-        # OSM's own record is rarely word-for-word identical (plural,
-        # abbreviation, missing "Pvt Ltd"). Comparing individual words
-        # against the CANDIDATE'S OWN name field specifically (not its full
-        # display, which includes the street/area and would let an unrelated
-        # same-street business tie on "Greams Road" alone) catches that case
-        # without the false-positive risk of scoring generic words anywhere
-        # in the display.
-        primary_name_words: set[str] = set()
-        if non_numeric_parts:
-            first = normalize_for_matching(_strip_corporate_suffix(non_numeric_parts[0]))
-            primary_name_words = {_stem(w) for w in first.split() if len(w) > 2}
 
-        def score(feature: dict[str, Any]) -> tuple[bool, int, int, int]:
+        def score(feature: dict[str, Any]) -> tuple[bool, int, int]:
             properties = feature.get("properties", {})
             postcode_ok = (
                 target_postcode is not None
@@ -246,38 +194,19 @@ class PhotonProvider:
             # explaining only one of several distinctive words is much weaker
             # evidence than one explaining all of them.
             match_count = sum(1 for p in distinctive_parts if p in display)
-            candidate_name_words = {
-                _stem(w)
-                for w in normalize_for_matching(properties.get("name") or "").split()
-            }
-            name_match_count = len(primary_name_words & candidate_name_words)
             plausible = (
-                postcode_ok
-                or match_count > 0
-                or name_match_count > 0
-                or not (target_postcode or distinctive_parts)
+                postcode_ok or match_count > 0 or not (target_postcode or distinctive_parts)
             )
-            return (
-                plausible,
-                name_match_count,
-                match_count,
-                _TYPE_RANK.get(properties.get("type", ""), 0),
-            )
+            return (plausible, match_count, _TYPE_RANK.get(properties.get("type", ""), 0))
 
         best: dict[str, Any] | None = None
-        best_score: tuple[bool, int, int, int] = (False, -1, -1, -1)
+        best_score: tuple[bool, int, int] = (False, -1, -1)
         last_exception: Exception | None = None
         any_clean_response = False
 
         for query in dict.fromkeys(queries):
             try:
-                # More than one candidate per query: Photon's own top hit is
-                # ranked on free-text relevance alone, which has no idea that
-                # (for example) "Greams Road" in the original address should
-                # prefer one same-named branch of a hospital chain over
-                # another. Scoring every candidate against the *whole*
-                # address lets a lower-ranked-by-Photon result still win here.
-                results = await self._search(query, limit=5)
+                results = await self._search(query)
             except Exception as exc:  # noqa: BLE001 - one bad candidate must not sink the rest
                 logger.warning("photon_query_failed", query=query, error=str(exc))
                 last_exception = exc
@@ -286,10 +215,10 @@ class PhotonProvider:
             if not results:
                 continue
 
-            for candidate in results:
-                candidate_score = score(candidate)
-                if candidate_score > best_score:
-                    best, best_score = candidate, candidate_score
+            candidate = results[0]
+            candidate_score = score(candidate)
+            if candidate_score > best_score:
+                best, best_score = candidate, candidate_score
             # No early exit: a fallback query that drops down to one bare,
             # generic word (e.g. "Mettupalayam Road" alone) can trivially
             # satisfy "plausible + decent type rank" by matching a
