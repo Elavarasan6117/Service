@@ -22,6 +22,7 @@
   --brand: #14507a;
   --brand-solid: #14507a;
   --brand-solid-hover: #0e3b5c;
+  --topbar-bg: #167a45;
   --brand-dark: #0e3b5c;
   --brand-light: #e3eef6;
 
@@ -62,6 +63,7 @@
     --brand: #58a6df;          /* accent text on dark backgrounds */
     --brand-solid: #1d4e73;    /* white text on this: 9.1:1 */
     --brand-solid-hover: #276491;
+    --topbar-bg: #176b40;
     --brand-dark: #7cbcec;
     --brand-light: #17293a;
     --ok: #66c98d;
@@ -104,7 +106,7 @@ button, input, select, textarea { font: inherit; color: inherit; }
   gap: 20px;
   padding: 0 20px;
   height: 56px;
-  background: var(--brand-solid);
+  background: var(--topbar-bg);
   color: #fff;
   box-shadow: var(--shadow);
   flex-shrink: 0;
