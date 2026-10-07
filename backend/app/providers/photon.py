@@ -150,6 +150,43 @@ class PhotonProvider:
                 )
             queries.extend(reversed(parts))
 
+        # Business parks and campuses are often missing from OpenStreetMap as
+        # named POIs even when their surrounding estate roads are mapped. Try
+        # a shorter place name plus its locality and Chennai context so an
+        # operator can confirm the approximate pin on the map instead of
+        # getting no result for a perfectly usable street address.
+        fallback_queries: list[tuple[str, list[str]]] = []
+        local_parts = [
+            part
+            for part in parts
+            if part.lower() not in {"chennai", "tamil nadu", "india"}
+            and not part.isdigit()
+        ]
+        if len(local_parts) > 1:
+            locality = local_parts[-1]
+            detail = ", ".join(local_parts[:-1])
+            simplified_detail = re.sub(
+                r"\b(?:main\s+)?(?:road|rd|street|st|avenue|ave)\b", "", detail,
+                flags=re.IGNORECASE,
+            )
+            simplified_detail = re.sub(r"\s+", " ", simplified_detail).strip(" ,")
+            if simplified_detail and simplified_detail.lower() != detail.lower():
+                fallback_terms = [
+                    word.lower()
+                    for word in re.findall(r"[\w]+", simplified_detail)
+                    if len(word) >= 4
+                ]
+                fallback_terms.append(locality.lower())
+                fallback_queries.append(
+                    (
+                        f"{simplified_detail}, {locality}, Chennai, Tamil Nadu, India",
+                        fallback_terms,
+                    )
+                )
+            fallback_queries.append(
+                (f"{locality}, Chennai, Tamil Nadu, India", [locality.lower()])
+            )
+
         pincode_match = re.search(r"\b(\d{6})\b", cleaned)
         target_postcode = pincode_match.group(1) if pincode_match else None
         non_numeric_parts = [p for p in parts if not p.strip().isdigit()]
@@ -174,7 +211,9 @@ class PhotonProvider:
             if len(p.strip()) > 2
         ]
 
-        def score(feature: dict[str, Any]) -> tuple[bool, int, int]:
+        def score(
+            feature: dict[str, Any], terms: list[str] = distinctive_parts
+        ) -> tuple[bool, int, int]:
             properties = feature.get("properties", {})
             postcode_ok = (
                 target_postcode is not None
@@ -185,9 +224,9 @@ class PhotonProvider:
             # do -- two different places can share one name, and a candidate
             # explaining only one of several distinctive words is much weaker
             # evidence than one explaining all of them.
-            match_count = sum(1 for p in distinctive_parts if p.lower() in display)
+            match_count = sum(1 for p in terms if p.lower() in display)
             plausible = (
-                postcode_ok or match_count > 0 or not (target_postcode or distinctive_parts)
+                postcode_ok or match_count > 0 or not (target_postcode or terms)
             )
             return (plausible, match_count, _TYPE_RANK.get(properties.get("type", ""), 0))
 
@@ -195,6 +234,7 @@ class PhotonProvider:
         best_score: tuple[bool, int, int] = (False, -1, -1)
         last_exception: Exception | None = None
         any_clean_response = False
+        best_needs_verification = False
 
         for query in dict.fromkeys(queries):
             try:
@@ -209,16 +249,53 @@ class PhotonProvider:
 
             candidate = results[0]
             candidate_score = score(candidate)
+            if not candidate_score[0]:
+                continue
             if candidate_score > best_score:
                 best, best_score = candidate, candidate_score
             if best_score[0] and best_score[2] >= _GOOD_ENOUGH_RANK:
                 break
 
         if best is None:
+            seen_fallback_queries: set[str] = set()
+            for query, terms in fallback_queries:
+                if query in seen_fallback_queries:
+                    continue
+                seen_fallback_queries.add(query)
+                try:
+                    results = await self._search(query, limit=5)
+                except Exception as exc:  # noqa: BLE001 - try the next local fallback
+                    logger.warning("photon_query_failed", query=query, error=str(exc))
+                    last_exception = exc
+                    continue
+                any_clean_response = True
+                for candidate in results:
+                    candidate_score = score(candidate, terms)
+                    if not candidate_score[0]:
+                        continue
+                    if candidate_score > best_score:
+                        best, best_score = candidate, candidate_score
+                        best_needs_verification = True
+                if best is not None and best_score[2] >= _GOOD_ENOUGH_RANK:
+                    break
+
+        if best is None:
             if not any_clean_response and last_exception is not None:
                 raise last_exception
             raise GeocodingNoResultError(f"No location found for: {address}")
-        return self._result(best)
+        result = self._result(best)
+        if best_needs_verification:
+            return GeocodeResult(
+                latitude=result.latitude,
+                longitude=result.longitude,
+                formatted_address=result.formatted_address,
+                confidence="low",
+                partial_match=True,
+                place_id=result.place_id,
+                components=result.components,
+                provider=result.provider,
+            )
+        return result
 
     async def reverse_geocode(self, lat: float, lng: float) -> GeocodeResult:
         response = await self.client.get(
