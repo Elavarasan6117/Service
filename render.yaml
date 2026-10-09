@@ -40,7 +40,7 @@ services:
         value: fake
       - key: GEOCODING_PROVIDER
         value: google_maps
-      - key: GOOGLE_MAPS_API_KEY
+      - key: AIzaSyDhZ8Z-ZNqLmO35a9AuEwQTSf0nENURH90
         sync: false
       # No Redis is provisioned here -- every cache/rate-limit/live-event path
       # in this codebase degrades to a no-op when Redis is unreachable (see
