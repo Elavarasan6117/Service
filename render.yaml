@@ -85,7 +85,7 @@ services:
       # This is a browser key. Restrict it to the deployed site hostname and
       # the Maps JavaScript API in Google Cloud Console.
       - key: VITE_GOOGLE_MAPS_API_KEY
-        sync: false
+        value: AIzaSyDhZ8Z-ZNqLmO35a9AuEwQTSf0nENURH90
     routes:
       - type: rewrite
         source: /*
