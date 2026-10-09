@@ -19,12 +19,17 @@ type MarkerEntry = { marker: google.maps.Marker; info?: google.maps.InfoWindow }
 
 let googleMapsPromise: Promise<void> | null = null
 
+// Render's static-site blueprint may be deployed independently from its
+// environment sync. Keep the explicitly configured browser key as a fallback
+// so a missing build-time VITE variable cannot blank the live map.
+const GOOGLE_MAPS_BROWSER_KEY = 'AIzaSyDhZ8Z-ZNqLmO35a9AuEwQTSf0nENURH90'
+
 function loadGoogleMaps(): Promise<void> {
   if (window.google?.maps) return Promise.resolve()
   if (googleMapsPromise) return googleMapsPromise
 
-  const apiKey = import.meta.env.VITE_GOOGLE_MAPS_API_KEY
-  if (!apiKey) return Promise.reject(new Error('Google Maps key is missing. Add VITE_GOOGLE_MAPS_API_KEY to frontend/.env.local and restart Vite.'))
+  const apiKey = import.meta.env.VITE_GOOGLE_MAPS_API_KEY || GOOGLE_MAPS_BROWSER_KEY
+  if (!apiKey) return Promise.reject(new Error('Google Maps key is missing. Set VITE_GOOGLE_MAPS_API_KEY in the frontend build environment.'))
 
   googleMapsPromise = new Promise((resolve, reject) => {
     const callbackName = '__serviceabilityGoogleMapsReady'
