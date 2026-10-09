@@ -70,7 +70,13 @@ async def geocode(
     payload: GeocodeRequest,
     user: User = Depends(require(Permission.VIEW)),
 ) -> GeocodeResponse:
-    result = await get_geocoding_provider().geocode(payload.address)
+    provider = get_geocoding_provider()
+    if payload.place_id and hasattr(provider.inner, "geocode_place"):
+        result = await provider.geocode_place(
+            payload.place_id, payload.address, payload.session_token
+        )
+    else:
+        result = await provider.geocode(payload.address)
     geocoding_results_total.labels(
         outcome="partial" if result.needs_verification else "success"
     ).inc()
@@ -82,6 +88,7 @@ async def geocode(
         partial_match=result.partial_match,
         needs_verification=result.needs_verification,
         provider=result.provider,
+        details=result.details,
     )
 
 
@@ -102,4 +109,5 @@ async def reverse_geocode(
         partial_match=result.partial_match,
         needs_verification=False,
         provider=result.provider,
+        details=result.details,
     )

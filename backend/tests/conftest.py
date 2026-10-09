@@ -15,6 +15,7 @@ from __future__ import annotations
 import os
 from collections.abc import AsyncGenerator
 from decimal import Decimal
+from weakref import WeakKeyDictionary
 
 os.environ.setdefault("ENVIRONMENT", "development")
 os.environ.setdefault("ROUTING_PROVIDER", "fake")
@@ -27,6 +28,7 @@ os.environ.setdefault("LOG_LEVEL", "WARNING")
 import pytest  # noqa: E402
 import pytest_asyncio  # noqa: E402
 from httpx import ASGITransport, AsyncClient  # noqa: E402
+from sqlalchemy import event  # noqa: E402
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine  # noqa: E402
 from sqlalchemy.pool import StaticPool  # noqa: E402
 
@@ -96,6 +98,13 @@ async def engine():
         connect_args={"check_same_thread": False},
         poolclass=StaticPool,
     )
+
+    @event.listens_for(eng.sync_engine, "connect")
+    def enable_sqlite_foreign_keys(connection, _record):
+        cursor = connection.cursor()
+        cursor.execute("PRAGMA foreign_keys=ON")
+        cursor.close()
+
     async with eng.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
     yield eng
@@ -278,8 +287,17 @@ async def client(engine, session) -> AsyncGenerator[AsyncClient, None]:
     fastapi_app.dependency_overrides.clear()
 
 
+_AUTH_HEADERS: WeakKeyDictionary[User, dict[str, str]] = WeakKeyDictionary()
+
+
 def auth_headers(user: User) -> dict[str, str]:
     from app.core.security import create_access_token
 
+    cached = _AUTH_HEADERS.get(user)
+    if cached is not None:
+        return cached
+
     token = create_access_token(str(user.id), user.role.value, user.username)
-    return {"Authorization": f"Bearer {token}"}
+    headers = {"Authorization": f"Bearer {token}"}
+    _AUTH_HEADERS[user] = headers
+    return headers

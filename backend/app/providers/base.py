@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import unicodedata
 from dataclasses import dataclass, field
-from typing import Protocol, runtime_checkable
+from typing import Any, Protocol, runtime_checkable
 
 from app.core.enums import DistanceType
 
@@ -81,6 +81,7 @@ class GeocodeResult:
     place_id: str | None = None
     components: dict[str, str] = field(default_factory=dict)
     provider: str = "unknown"
+    details: dict[str, Any] = field(default_factory=dict)
 
     @property
     def needs_verification(self) -> bool:

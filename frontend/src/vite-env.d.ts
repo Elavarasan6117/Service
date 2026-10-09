@@ -4,11 +4,12 @@ interface ImportMetaEnv {
   /**
    * Base path for the API. Defaults to a same-origin '/api/v1'.
    *
-   * Note what is NOT here: no mapping or routing API key. VITE_ variables are
-   * inlined into the bundle and therefore public. Every provider credential
-   * stays on the backend (brief section 20).
+   * VITE_ values are public in the browser bundle. The Google Maps JavaScript
+   * key is supplied locally and must be restricted to Maps JavaScript API and
+   * the app's allowed HTTP referrers in Google Cloud Console.
    */
   readonly VITE_API_BASE_URL?: string
+  readonly VITE_GOOGLE_MAPS_API_KEY?: string
 }
 
 interface ImportMeta {

@@ -1,5 +1,4 @@
-import { useEffect, useRef } from 'react'
-import L from 'leaflet'
+import { useEffect, useRef, useState } from 'react'
 
 import type { MapOperations, ServiceabilityResult } from '../types/api'
 import { STATUS_MARKER_COLOR } from './StatusBadge'
@@ -8,52 +7,68 @@ import { decodePolyline } from '../lib/polyline'
 interface Props {
   data: MapOperations | null
   result: ServiceabilityResult | null
-  /** The point currently being assessed, which the operator can drag. */
   draftPoint: { latitude: number; longitude: number } | null
   draggable: boolean
   onDragEnd?: (latitude: number, longitude: number) => void
   onMapClick?: (latitude: number, longitude: number) => void
-  /**
-   * The point(s) of whichever warehouse/service-location form(s) currently
-   * have an address resolved in the Locations section, so typing an address
-   * there marks it directly on this shared map instead of a private per-form
-   * map -- coloured to match this same map's own legend (purple square =
-   * warehouse, blue circle = service location) so it reads as "this is what
-   * that marker will look like" rather than a new, unexplained colour.
-   *
-   * A list, not a single point: the Dashboard's two quick-add forms
-   * (warehouse and service) are both visible at once and each needs its own
-   * independent pin, not one shared marker that jumps to whichever form was
-   * typed in most recently.
-   */
   editorPoints: { id: string; latitude: number; longitude: number; kind: 'warehouse' | 'service' }[]
   onEditorDragEnd?: (id: string, latitude: number, longitude: number) => void
 }
 
-function circleIcon(color: string, size: number): L.DivIcon {
-  return L.divIcon({
-    className: '',
-    html: `<div class="marker-pin" style="width:${size}px;height:${size}px;background:${color}"></div>`,
-    iconSize: [size, size],
-    iconAnchor: [size / 2, size / 2],
+type MarkerEntry = { marker: google.maps.Marker; info?: google.maps.InfoWindow }
+
+let googleMapsPromise: Promise<void> | null = null
+
+function loadGoogleMaps(): Promise<void> {
+  if (window.google?.maps) return Promise.resolve()
+  if (googleMapsPromise) return googleMapsPromise
+
+  const apiKey = import.meta.env.VITE_GOOGLE_MAPS_API_KEY
+  if (!apiKey) return Promise.reject(new Error('Google Maps key is missing. Add VITE_GOOGLE_MAPS_API_KEY to frontend/.env.local and restart Vite.'))
+
+  googleMapsPromise = new Promise((resolve, reject) => {
+    const callbackName = '__serviceabilityGoogleMapsReady'
+    const callbackHost = window as unknown as Record<string, () => void>
+    callbackHost[callbackName] = () => {
+      delete callbackHost[callbackName]
+      resolve()
+    }
+    const script = document.createElement('script')
+    script.src = `https://maps.googleapis.com/maps/api/js?key=${encodeURIComponent(apiKey)}&callback=${callbackName}&loading=async`
+    script.async = true
+    script.defer = true
+    script.onerror = () => {
+      delete callbackHost[callbackName]
+      googleMapsPromise = null
+      reject(new Error('Google Maps could not load. Check that this key has Maps JavaScript API enabled and is allowed for this site.'))
+    }
+    document.head.appendChild(script)
   })
+  return googleMapsPromise
 }
 
-const WAREHOUSE_ICON = L.divIcon({
-  className: '',
-  html:
-    '<div class="marker-pin marker-pin--warehouse" style="width:26px;height:26px;background:#4b2e83">W</div>',
-  iconSize: [26, 26],
-  iconAnchor: [13, 13],
-})
+function markerIcon(color: string, radius: number, square = false): google.maps.MarkerIcon {
+  const size = radius * 2
+  const shape = square
+    ? `<rect x="1" y="1" width="${size - 2}" height="${size - 2}" rx="4" fill="${color}" stroke="#ffffff" stroke-width="2"/><text x="${radius}" y="${radius + 4}" text-anchor="middle" font-family="Arial,sans-serif" font-size="${Math.max(10, radius)}" font-weight="700" fill="#ffffff">W</text>`
+    : `<circle cx="${radius}" cy="${radius}" r="${radius - 2}" fill="${color}" stroke="#ffffff" stroke-width="2"/>`
+  const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="${size}" height="${size}" viewBox="0 0 ${size} ${size}">${shape}</svg>`
+  return {
+    url: `data:image/svg+xml;charset=UTF-8,${encodeURIComponent(svg)}`,
+    scaledSize: new window.google!.maps.Size(size, size),
+    anchor: new window.google!.maps.Point(radius, radius),
+  }
+}
 
-/**
- * Leaflet map over OpenStreetMap tiles.
- *
- * Deliberately not the Google Maps JS API: that would require shipping a Maps
- * key to the browser. Every Google call this system makes is server-side, and
- * the route drawn here is geometry the backend already fetched and returned.
- */
+function escapeHtml(value: string): string {
+  return value
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;')
+}
+
 export function OperationsMap({
   data,
   result,
@@ -65,299 +80,299 @@ export function OperationsMap({
   onEditorDragEnd,
 }: Props) {
   const containerRef = useRef<HTMLDivElement | null>(null)
-  const mapRef = useRef<L.Map | null>(null)
-  const layersRef = useRef<{
-    services: L.LayerGroup
-    warehouses: L.LayerGroup
-    customers: L.LayerGroup
-    focus: L.LayerGroup
-  } | null>(null)
-  const draftMarkerRef = useRef<L.Marker | null>(null)
-  const editorMarkersRef = useRef<Map<string, L.Marker>>(new Map())
-  const tileLayerRef = useRef<L.TileLayer | null>(null)
+  const mapRef = useRef<google.maps.Map | null>(null)
+  const staticMarkersRef = useRef<MarkerEntry[]>([])
+  const draftMarkerRef = useRef<google.maps.Marker | null>(null)
+  const editorMarkersRef = useRef<Map<string, google.maps.Marker>>(new Map())
+  const focusMarkersRef = useRef<MarkerEntry[]>([])
+  const focusLinesRef = useRef<google.maps.Polyline[]>([])
   const onMapClickRef = useRef(onMapClick)
+  const onDragEndRef = useRef(onDragEnd)
+  const onEditorDragEndRef = useRef(onEditorDragEnd)
+  const [focusedServiceId, setFocusedServiceId] = useState<string | null>(null)
+  const [mapError, setMapError] = useState<string | null>(null)
+  const [mapReady, setMapReady] = useState(false)
+
+  useEffect(() => { onMapClickRef.current = onMapClick }, [onMapClick])
+  useEffect(() => { onDragEndRef.current = onDragEnd }, [onDragEnd])
+  useEffect(() => { onEditorDragEndRef.current = onEditorDragEnd }, [onEditorDragEnd])
 
   useEffect(() => {
-    onMapClickRef.current = onMapClick
-  }, [onMapClick])
-
-  // --- Create the map once ------------------------------------------------
-  useEffect(() => {
-    if (!containerRef.current || mapRef.current) return
-
-    const map = L.map(containerRef.current, {
-      center: [13.0827, 80.2707],
-      zoom: 12,
-      zoomControl: true,
-      preferCanvas: true, // markedly faster with thousands of markers
-    })
-    mapRef.current = map
-    layersRef.current = {
-      services: L.layerGroup().addTo(map),
-      warehouses: L.layerGroup().addTo(map),
-      customers: L.layerGroup().addTo(map),
-      focus: L.layerGroup().addTo(map),
-    }
-    map.on('click', (event) => {
-      onMapClickRef.current?.(
-        Number(event.latlng.lat.toFixed(6)),
-        Number(event.latlng.lng.toFixed(6)),
-      )
+    let cancelled = false
+    void loadGoogleMaps().then(() => {
+      if (cancelled || !containerRef.current) return
+      const map = new window.google!.maps.Map(containerRef.current, {
+        center: { lat: data?.center.latitude ?? 13.0827, lng: data?.center.longitude ?? 80.2707 },
+        zoom: data?.zoom ?? 12,
+        fullscreenControl: true,
+        mapTypeControl: false,
+        streetViewControl: false,
+        clickableIcons: false,
+      })
+      mapRef.current = map
+      setMapReady(true)
+      map.addListener('click', (event) => {
+        if (!event.latLng) return
+        onMapClickRef.current?.(
+          Number(event.latLng.lat().toFixed(6)),
+          Number(event.latLng.lng().toFixed(6)),
+        )
+      })
+    }).catch((error: unknown) => {
+      if (!cancelled) setMapError(error instanceof Error ? error.message : 'Google Maps could not load.')
     })
 
     return () => {
-      map.remove()
-      mapRef.current = null
-      layersRef.current = null
-      tileLayerRef.current = null
+      cancelled = true
+      for (const entry of staticMarkersRef.current) entry.marker.setMap(null)
+      for (const entry of focusMarkersRef.current) entry.marker.setMap(null)
+      for (const line of focusLinesRef.current) line.setMap(null)
+      draftMarkerRef.current?.setMap(null)
+      for (const marker of editorMarkersRef.current.values()) marker.setMap(null)
+      staticMarkersRef.current = []
+      focusMarkersRef.current = []
+      focusLinesRef.current = []
       draftMarkerRef.current = null
       editorMarkersRef.current.clear()
+      mapRef.current = null
     }
   }, [])
 
-  // --- Base layer and static markers -------------------------------------
   useEffect(() => {
     const map = mapRef.current
-    const layers = layersRef.current
-    if (!map || !layers || !data) return
+    if (!map || !data) return
+    for (const entry of staticMarkersRef.current) entry.marker.setMap(null)
+    staticMarkersRef.current = []
 
-    // The tile URL comes from the backend, so the base layer can only be built
-    // once map data has arrived. Added once and then left alone.
-    if (tileLayerRef.current === null) {
-      tileLayerRef.current = L.tileLayer(data.tileUrl, {
-        attribution: data.tileAttribution,
-        maxZoom: 19,
-      }).addTo(map)
-    }
-
-    layers.warehouses.clearLayers()
     for (const warehouse of data.warehouses) {
-      L.marker([warehouse.latitude, warehouse.longitude], { icon: WAREHOUSE_ICON })
-        .bindPopup(
-          `<strong>${escapeHtml(warehouse.warehouseName)}</strong><br/>` +
-            `Warehouse · ${escapeHtml(warehouse.warehouseCode)}`,
-        )
-        .addTo(layers.warehouses)
+      const marker = new window.google!.maps.Marker({
+        map,
+        position: { lat: warehouse.latitude, lng: warehouse.longitude },
+        title: warehouse.warehouseName,
+        icon: markerIcon('#4b2e83', 10, true),
+        label: { text: 'W', color: '#ffffff', fontSize: '10px', fontWeight: '700' },
+      })
+      const info = new window.google!.maps.InfoWindow({
+        content: `<strong>${escapeHtml(warehouse.warehouseName)}</strong><br/>Warehouse · ${escapeHtml(warehouse.warehouseCode)}`,
+      })
+      marker.addListener('click', () => info.open({ map, anchor: marker }))
+      staticMarkersRef.current.push({ marker, info })
     }
 
-    layers.services.clearLayers()
     for (const location of data.serviceLocations) {
       if (location.latitude == null || location.longitude == null) continue
-      L.marker([location.latitude, location.longitude], {
-        icon: circleIcon('#1a5fa8', 11),
+      const marker = new window.google!.maps.Marker({
+        map,
+        position: { lat: location.latitude, lng: location.longitude },
+        title: location.locationName,
+        icon: markerIcon('#1a5fa8', 7),
       })
-        .bindPopup(
-          `<strong>${escapeHtml(location.locationName)}</strong><br/>` +
-            `Existing service · ${escapeHtml(location.serviceCode)}<br/>` +
-            `${escapeHtml(location.serviceArea ?? location.area ?? '')}`,
-        )
-        .addTo(layers.services)
+      const info = new window.google!.maps.InfoWindow({
+        content: `<strong>${escapeHtml(location.locationName)}</strong><br/>Existing service · ${escapeHtml(location.serviceCode)}<br/>${escapeHtml(location.serviceArea ?? location.area ?? '')}`,
+      })
+      marker.addListener('click', () => info.open({ map, anchor: marker }))
+      staticMarkersRef.current.push({ marker, info })
     }
 
-    layers.customers.clearLayers()
     for (const customer of data.customers) {
       const color = STATUS_MARKER_COLOR[customer.serviceStatus] ?? '#7d8896'
-      const distance =
-        customer.nearestServiceDistanceMeters != null
-          ? `${(customer.nearestServiceDistanceMeters / 1000).toFixed(2)} km by road`
-          : 'no road distance recorded'
-      L.marker([customer.latitude, customer.longitude], {
-        icon: circleIcon(color, 15),
+      const distance = customer.nearestServiceDistanceMeters != null
+        ? `${(customer.nearestServiceDistanceMeters / 1000).toFixed(2)} km by road`
+        : 'no road distance recorded'
+      const marker = new window.google!.maps.Marker({
+        map,
+        position: { lat: customer.latitude, lng: customer.longitude },
+        title: customer.customerName,
+        icon: markerIcon(color, 9),
       })
-        .bindPopup(
-          `<strong>${escapeHtml(customer.customerName)}</strong><br/>` +
-            `${escapeHtml(customer.customerCode)}<br/>` +
-            `<b>${customer.serviceStatus.replace(/_/g, ' ')}</b><br/>${distance}`,
-        )
-        .addTo(layers.customers)
+      const info = new window.google!.maps.InfoWindow({
+        content: `<strong>${escapeHtml(customer.customerName)}</strong><br/>${escapeHtml(customer.customerCode)}<br/><b>${escapeHtml(customer.serviceStatus.replace(/_/g, ' '))}</b><br/>${distance}`,
+      })
+      marker.addListener('click', () => info.open({ map, anchor: marker }))
+      staticMarkersRef.current.push({ marker, info })
     }
-  }, [data])
+  }, [data, mapReady])
 
-  // --- Draggable draft marker --------------------------------------------
   useEffect(() => {
     const map = mapRef.current
     if (!map) return
-
     if (!draftPoint) {
-      draftMarkerRef.current?.remove()
+      draftMarkerRef.current?.setMap(null)
       draftMarkerRef.current = null
       return
     }
-
-    const position: L.LatLngExpression = [draftPoint.latitude, draftPoint.longitude]
+    const position = { lat: draftPoint.latitude, lng: draftPoint.longitude }
     if (!draftMarkerRef.current) {
-      const marker = L.marker(position, {
+      const marker = new window.google!.maps.Marker({
+        map,
+        position,
+        title: 'New customer — drag to correct, then Confirm',
         draggable,
-        icon: circleIcon('#111827', 19),
-        zIndexOffset: 1000,
+        zIndex: 1000,
+        icon: markerIcon('#111827', 11),
       })
-        .bindTooltip('New customer — drag to correct, then Confirm', {
-          permanent: false,
-          direction: 'top',
-        })
-        .addTo(map)
-      marker.on('dragend', () => {
-        const { lat, lng } = marker.getLatLng()
-        onDragEnd?.(Number(lat.toFixed(6)), Number(lng.toFixed(6)))
+      marker.addListener('dragend', () => {
+        const point = marker.getPosition()
+        if (point) onDragEndRef.current?.(Number(point.lat().toFixed(6)), Number(point.lng().toFixed(6)))
       })
       draftMarkerRef.current = marker
     } else {
-      draftMarkerRef.current.setLatLng(position)
-      if (draggable) draftMarkerRef.current.dragging?.enable()
-      else draftMarkerRef.current.dragging?.disable()
+      draftMarkerRef.current.setMap(map)
+      draftMarkerRef.current.setPosition(position)
+      draftMarkerRef.current.setDraggable(draggable)
     }
-    map.panTo(position, { animate: true })
-  }, [draftPoint, draggable, onDragEnd])
+    map.panTo(position)
+    if ((map.getZoom() ?? 0) < 16) map.setZoom(16)
+  }, [draftPoint, draggable, mapReady])
 
-  // --- Location-editor draft marker(s) (warehouse/service, from the
-  // Locations section) -- entirely independent of the customer draftPoint
-  // above, so editing a location and drafting a new customer never conflict.
-  // A marker per point, keyed by id, so the Dashboard's warehouse and
-  // service quick-add forms each keep their own pin instead of sharing one
-  // that jumps to whichever form was typed in most recently. -------------
   useEffect(() => {
     const map = mapRef.current
     if (!map) return
     const markers = editorMarkersRef.current
-
     const seenIds = new Set(editorPoints.map((point) => point.id))
     for (const [id, marker] of markers) {
       if (!seenIds.has(id)) {
-        marker.remove()
+        marker.setMap(null)
         markers.delete(id)
       }
     }
-
-    let lastPosition: L.LatLngExpression | null = null
+    let lastPosition: google.maps.LatLngLiteral | null = null
     for (const point of editorPoints) {
-      const position: L.LatLngExpression = [point.latitude, point.longitude]
+      const position = { lat: point.latitude, lng: point.longitude }
       lastPosition = position
-      const icon = point.kind === 'warehouse' ? WAREHOUSE_ICON : circleIcon('#1a5fa8', 19)
-      const label =
-        point.kind === 'warehouse'
-          ? 'New warehouse — drag to correct, then Save'
-          : 'New service location — drag to correct, then Save'
-
       const existing = markers.get(point.id)
       if (!existing) {
-        const marker = L.marker(position, { draggable: true, icon, zIndexOffset: 1000 })
-          .bindTooltip(label, { permanent: false, direction: 'top' })
-          .addTo(map)
-        marker.on('dragend', () => {
-          const { lat, lng } = marker.getLatLng()
-          onEditorDragEnd?.(point.id, Number(lat.toFixed(6)), Number(lng.toFixed(6)))
+        const marker = new window.google!.maps.Marker({
+          map,
+          position,
+          draggable: true,
+          zIndex: 1000,
+          title: point.kind === 'warehouse'
+            ? 'New warehouse — drag to correct, then Save'
+            : 'New service location — drag to correct, then Save',
+          icon: markerIcon(point.kind === 'warehouse' ? '#4b2e83' : '#1a5fa8', point.kind === 'warehouse' ? 10 : 11, point.kind === 'warehouse'),
+          label: point.kind === 'warehouse'
+            ? { text: 'W', color: '#ffffff', fontSize: '10px', fontWeight: '700' }
+            : undefined,
+        })
+        marker.addListener('dragend', () => {
+          const dragged = marker.getPosition()
+          if (dragged) onEditorDragEndRef.current?.(point.id, Number(dragged.lat().toFixed(6)), Number(dragged.lng().toFixed(6)))
         })
         markers.set(point.id, marker)
       } else {
-        existing.setLatLng(position)
-        existing.setIcon(icon)
-        existing.setTooltipContent(label)
+        existing.setMap(map)
+        existing.setPosition(position)
       }
     }
-    if (lastPosition) map.panTo(lastPosition, { animate: true })
-  }, [editorPoints, onEditorDragEnd])
+    if (lastPosition) map.panTo(lastPosition)
+  }, [editorPoints, mapReady])
 
-  // --- Route + nearest highlight -----------------------------------------
   useEffect(() => {
     const map = mapRef.current
-    const layers = layersRef.current
-    if (!map || !layers) return
-
-    layers.focus.clearLayers()
+    if (!map) return
+    for (const entry of focusMarkersRef.current) entry.marker.setMap(null)
+    for (const line of focusLinesRef.current) line.setMap(null)
+    focusMarkersRef.current = []
+    focusLinesRef.current = []
     if (!result?.nearestServiceLocation || !draftPoint) return
 
     const nearest = result.nearestServiceLocation
-    const isAvailable = result.status === 'AVAILABLE'
-    const color = isAvailable ? '#0f7b3d' : '#b4232b'
-
+    const color = result.status === 'AVAILABLE' ? '#0f7b3d' : '#b4232b'
     if (nearest.latitude != null && nearest.longitude != null) {
-      L.marker([nearest.latitude, nearest.longitude], {
-        icon: circleIcon(color, 19),
-        zIndexOffset: 900,
+      const marker = new window.google!.maps.Marker({
+        map,
+        position: { lat: nearest.latitude, lng: nearest.longitude },
+        title: nearest.name,
+        zIndex: 900,
+        icon: markerIcon(color, 11),
       })
-        .bindPopup(
-          `<strong>${escapeHtml(nearest.name)}</strong><br/>` +
-            `Nearest existing service · ${escapeHtml(nearest.serviceCode)}<br/>` +
-            `<b>${nearest.distanceKm.toFixed(2)} km by road</b>`,
-        )
-        .addTo(layers.focus)
-        .openPopup()
+      const info = new window.google!.maps.InfoWindow({
+        content: `<strong>${escapeHtml(nearest.name)}</strong><br/>Nearest existing service · ${escapeHtml(nearest.serviceCode)}<br/><b>${nearest.distanceKm.toFixed(2)} km by road</b>`,
+      })
+      info.open({ map, anchor: marker })
+      focusMarkersRef.current.push({ marker, info })
     }
 
-    // The route geometry is what the routing provider actually returned, so
-    // the line on the map is the road path the distance was measured along --
-    // not a straight line between the two points.
-    const points = result.route?.geometry
-      ? decodePolyline(result.route.geometry)
-      : []
-
+    const points = result.route?.geometry ? decodePolyline(result.route.geometry) : []
     if (points.length > 1) {
-      L.polyline(points, {
-        color,
-        weight: 5,
-        opacity: 0.85,
-        lineJoin: 'round',
-      }).addTo(layers.focus)
-      map.fitBounds(L.latLngBounds(points).pad(0.25), { maxZoom: 16 })
+      const path = points.map(([lat, lng]) => ({ lat, lng }))
+      const line = new window.google!.maps.Polyline({
+        map,
+        path,
+        strokeColor: color,
+        strokeOpacity: 0.86,
+        strokeWeight: 5,
+        clickable: false,
+      })
+      focusLinesRef.current.push(line)
+      const bounds = new window.google!.maps.LatLngBounds()
+      for (const point of path) bounds.extend(point)
+      map.fitBounds(bounds, 48)
     } else if (nearest.latitude != null && nearest.longitude != null) {
-      // No geometry returned. Draw a dashed straight line and label it as such
-      // so nobody mistakes it for the measured route.
-      L.polyline(
-        [
-          [draftPoint.latitude, draftPoint.longitude],
-          [nearest.latitude, nearest.longitude],
+      const line = new window.google!.maps.Polyline({
+        map,
+        path: [
+          { lat: draftPoint.latitude, lng: draftPoint.longitude },
+          { lat: nearest.latitude, lng: nearest.longitude },
         ],
-        { color, weight: 3, opacity: 0.6, dashArray: '7 7' },
-      )
-        .bindTooltip(
-          'Route geometry unavailable — straight line shown for reference only. ' +
-            'The distance above is still the measured road distance.',
-        )
-        .addTo(layers.focus)
+        strokeColor: color,
+        strokeOpacity: 0.7,
+        strokeWeight: 3,
+        icons: [{ icon: { path: 'M 0,-1 0,1', strokeOpacity: 1, scale: 4 }, offset: '0', repeat: '12px' }],
+        clickable: true,
+      })
+      const info = new window.google!.maps.InfoWindow({
+        content: 'Route geometry unavailable — straight line shown for reference only. Road distance is measured separately.',
+      })
+      line.addListener('click', (event) => {
+        if (event.latLng) info.setPosition(event.latLng)
+        info.open({ map })
+      })
+      focusLinesRef.current.push(line)
     }
-  }, [result, draftPoint])
+  }, [result, draftPoint, mapReady])
+
+  const serviceLocations = data?.serviceLocations.filter(
+    (location) => location.latitude != null && location.longitude != null,
+  ) ?? []
 
   return (
     <div className="map-shell">
-      <div ref={containerRef} style={{ height: '100%', width: '100%' }} />
+      {serviceLocations.length > 0 && (
+        <div className="map-destinations" aria-label="Service location destinations">
+          <div className="map-destinations__heading">Service destinations</div>
+          <div className="map-destinations__list">
+            {serviceLocations.map((location) => (
+              <button
+                type="button"
+                key={location.id}
+                className={`map-destination${focusedServiceId === location.id ? ' map-destination--active' : ''}`}
+                aria-pressed={focusedServiceId === location.id}
+                onClick={() => {
+                  setFocusedServiceId(location.id)
+                  mapRef.current?.panTo({ lat: location.latitude!, lng: location.longitude! })
+                  mapRef.current?.setZoom(15)
+                }}
+              >
+                <span className="map-destination__name">{location.locationName}</span>
+                <span className="map-destination__detail">{location.serviceArea || location.area || location.serviceCode}</span>
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
+      <div ref={containerRef} className="map-canvas" />
+      {mapError && <div className="map-error" role="alert">{mapError}</div>}
       <div className="map-legend">
         <div className="map-legend__title">Legend</div>
-        <div className="map-legend__row">
-          <span
-            className="map-legend__swatch map-legend__swatch--square"
-            style={{ background: '#4b2e83' }}
-          />
-          Warehouse
-        </div>
-        <div className="map-legend__row">
-          <span className="map-legend__swatch" style={{ background: '#1a5fa8' }} />
-          Existing service location
-        </div>
-        <div className="map-legend__row">
-          <span className="map-legend__swatch" style={{ background: '#111827' }} />
-          New customer
-        </div>
-        <div className="map-legend__row">
-          <span className="map-legend__swatch" style={{ background: '#0f7b3d' }} />
-          Available / nearest
-        </div>
-        <div className="map-legend__row">
-          <span className="map-legend__swatch" style={{ background: '#b4232b' }} />
-          Not available
-        </div>
-        <div className="map-legend__row">
-          <span className="map-legend__swatch" style={{ background: '#9a5b06' }} />
-          Needs verification
-        </div>
+        <div className="map-legend__row"><span className="map-legend__swatch map-legend__swatch--square" style={{ background: '#4b2e83' }} />Warehouse</div>
+        <div className="map-legend__row"><span className="map-legend__swatch" style={{ background: '#1a5fa8' }} />Existing service location</div>
+        <div className="map-legend__row"><span className="map-legend__swatch" style={{ background: '#111827' }} />New customer</div>
+        <div className="map-legend__row"><span className="map-legend__swatch" style={{ background: '#0f7b3d' }} />Available / nearest</div>
+        <div className="map-legend__row"><span className="map-legend__swatch" style={{ background: '#b4232b' }} />Not available</div>
+        <div className="map-legend__row"><span className="map-legend__swatch" style={{ background: '#9a5b06' }} />Needs verification</div>
       </div>
     </div>
   )
-}
-
-function escapeHtml(value: string): string {
-  return value
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;')
 }

@@ -20,6 +20,14 @@ double-click **`START-HERE-Windows.bat`**. It checks for Python and Node.js, tel
 install if either is missing, sets everything up inside the folder and opens the app. See
 `READ-ME-FIRST.txt`.
 
+The Windows demo now uses Google Geocoding API v4 and Places API (New) for worldwide address
+lookup. Typed addresses return Google precision and address components; choosing an autocomplete
+result uses that exact Google place ID and returns its map location and address details. Before
+starting it, add your Google Maps API key to `backend/.env` as `GOOGLE_MAPS_API_KEY=...`. Enable
+both APIs and billing in Google Cloud. Leave
+`GOOGLE_MAPS_REGION` and `GOOGLE_PLACES_COUNTRY_FILTER` empty for worldwide search. The local
+demo still uses estimated routing distances.
+
 **Everything else:**
 
 ```bash
@@ -155,7 +163,7 @@ TEST_POSTGRES_URL=postgresql+asyncpg://user:pass@localhost:5432/test python -m p
 
 ## Security posture
 
-- **No mapping API key reaches the browser.** The map uses Leaflet over OSM tiles, which needs no key; geocoding, autocomplete, distance and directions are all proxied by the backend. Verified in the deployment runbook (§3.10).
+- The map uses Google Maps JavaScript API with a separate browser key restricted by HTTP referrer and API. Geocoding and routing keys stay server-side; none of these keys should be committed to source control.
 - JWT authentication, five roles, permission checks as FastAPI dependencies.
 - The 2 km threshold is ADMIN-only and every change is audited with a mandatory reason.
 - Redis token-bucket rate limiting, shared across API replicas.

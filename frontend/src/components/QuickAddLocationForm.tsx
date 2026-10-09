@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 
 import { ApiError, api } from '../api/client'
+import { addressWithContext } from '../lib/address'
 import type { AddressSuggestion } from '../types/api'
 
 type Kind = 'warehouse' | 'service'
@@ -65,18 +66,22 @@ export function QuickAddLocationForm({
   const sessionTokenRef = useRef(crypto.randomUUID())
   const debounceRef = useRef<number | undefined>(undefined)
   const geocodeDebounceRef = useRef<number | undefined>(undefined)
+  const autocompleteRequestRef = useRef(0)
+  const geocodeRequestRef = useRef(0)
   const lastGeocodeAttemptRef = useRef('')
 
   // A drag on this form's own map marker, fed back in. Ignore it if it's
   // just an echo of the point this form itself just pushed via resolveAddress.
   useEffect(() => {
     if (!point || samePoint(point, latitude, longitude)) return
+    const requestId = ++geocodeRequestRef.current
     const { latitude: lat, longitude: lng } = point
     setLatitude(lat.toFixed(6))
     setLongitude(lng.toFixed(6))
     void (async () => {
       try {
         const reverse = await api.reverseGeocode(lat, lng)
+        if (requestId !== geocodeRequestRef.current) return
         setAddress(reverse.formattedAddress)
       } catch {
         // The pin is still placed correctly even if reverse geocoding fails.
@@ -89,15 +94,23 @@ export function QuickAddLocationForm({
     onPointChange({ latitude: lat, longitude: lng })
   }
 
-  const resolveAddress = async (value: string) => {
+  const resolveAddress = async (
+    value: string,
+    placeId?: string,
+    sessionToken?: string,
+  ) => {
     if (!value.trim()) return
     lastGeocodeAttemptRef.current = value.trim()
+    const requestId = ++geocodeRequestRef.current
     setGeocoding(true)
     setNotice(null)
     try {
-      const result = await api.geocode(value)
+      const query = addressWithContext(value, 'Chennai', 'India')
+      const result = await api.geocode(query, placeId, sessionToken)
+      if (requestId !== geocodeRequestRef.current) return
       setLatitude(result.latitude.toFixed(6))
       setLongitude(result.longitude.toFixed(6))
+      if (result.formattedAddress) setAddress(result.formattedAddress)
       pushPoint(result.latitude, result.longitude)
       if (result.needsVerification) {
         setNotice(
@@ -105,19 +118,27 @@ export function QuickAddLocationForm({
             'the exact location before saving.',
         )
       }
-    } catch {
+    } catch (exception) {
+      if (requestId !== geocodeRequestRef.current) return
       setNotice(
-        'Unable to locate this address. Please check the address or place the ' +
-          'pin manually on the map.',
+        exception instanceof ApiError && exception.status >= 500
+          ? 'Address search is temporarily unavailable. Please retry shortly or place the pin manually on the map.'
+          : 'Unable to locate this address. Please check the address or place the pin manually on the map.',
       )
     } finally {
-      setGeocoding(false)
+      if (requestId === geocodeRequestRef.current) setGeocoding(false)
     }
   }
 
   const onAddressChange = (event: React.ChangeEvent<HTMLTextAreaElement>) => {
     const value = event.target.value
+    const autocompleteRequest = ++autocompleteRequestRef.current
+    geocodeRequestRef.current += 1
+    lastGeocodeAttemptRef.current = ''
     setAddress(value)
+    setLatitude('')
+    setLongitude('')
+    onPointChange(null)
     setJustAdded(null)
     window.clearTimeout(debounceRef.current)
     window.clearTimeout(geocodeDebounceRef.current)
@@ -128,9 +149,11 @@ export function QuickAddLocationForm({
     debounceRef.current = window.setTimeout(async () => {
       try {
         const results = await api.autocomplete(value, sessionTokenRef.current)
+        if (autocompleteRequest !== autocompleteRequestRef.current) return
         setSuggestions(results)
         setShowSuggestions(true)
       } catch {
+        if (autocompleteRequest !== autocompleteRequestRef.current) return
         setSuggestions([])
       }
     }, 300)
@@ -151,11 +174,16 @@ export function QuickAddLocationForm({
   }
 
   const chooseSuggestion = async (suggestion: AddressSuggestion) => {
+    geocodeRequestRef.current += 1
+    autocompleteRequestRef.current += 1
+    window.clearTimeout(debounceRef.current)
+    window.clearTimeout(geocodeDebounceRef.current)
     setAddress(suggestion.description)
     setShowSuggestions(false)
     setSuggestions([])
+    const sessionToken = sessionTokenRef.current
     sessionTokenRef.current = crypto.randomUUID()
-    await resolveAddress(suggestion.description)
+    await resolveAddress(suggestion.description, suggestion.placeId, sessionToken)
   }
 
   const reset = () => {

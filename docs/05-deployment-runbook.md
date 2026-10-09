@@ -26,7 +26,7 @@ Each has its own `.env`, its own database, and its own Google Maps API key with 
 
 1. Create a dedicated project for production. Do not reuse the development project — a shared quota means a development loop can exhaust production's.
 2. Enable exactly four APIs: **Geocoding API**, **Places API**, **Distance Matrix API**, **Directions API**.
-3. Create one API key. Under *Application restrictions* choose **IP addresses** and enter the production host's egress IP. Under *API restrictions* select only the four APIs above.
+3. Create two API keys. Restrict the server key by IP and limit it to Geocoding, Places, Distance Matrix, and Directions APIs. Restrict the browser key by the deployed site's HTTP referrer and limit it to Maps JavaScript API. The browser key is visible in the downloaded JavaScript by design; referrer and API restrictions are required.
 4. Set a **daily quota cap** on each API. This is the only hard stop against a runaway loop turning into an invoice.
 5. Set a billing budget alert at your expected monthly spend.
 
@@ -55,6 +55,7 @@ Edit `.env` and set, at minimum:
 | `SECRET_KEY` | the generated 64-char string |
 | `POSTGRES_PASSWORD` | the generated password |
 | `GOOGLE_MAPS_API_KEY` | the restricted production key |
+| `VITE_GOOGLE_MAPS_API_KEY` | browser key restricted to the deployed hostname and Maps JavaScript API |
 | `BOOTSTRAP_ADMIN_PASSWORD` | a strong password, changed after first login |
 | `CORS_ORIGINS` / `TRUSTED_HOSTS` | the real hostname |
 
@@ -159,10 +160,9 @@ curl -s -X POST https://<host>/api/v1/serviceability/preview \
 curl -s -o /dev/null -w '%{http_code}\n' https://<host>/api/v1/docs
 # PASS: 404
 
-# 3.10 No API key reachable from the browser bundle
-curl -s https://<host>/assets/index-*.js | grep -c 'AIza'
-# PASS: 0. A non-zero result means a key leaked into the frontend build --
-#       revoke that key immediately.
+# 3.10 Confirm the frontend bundle contains only the browser key, never the
+# server key. The browser key is public by design and must be restricted by
+# HTTP referrer and API in Google Cloud Console.
 
 # 3.11 Metrics not exposed publicly
 curl -s -o /dev/null -w '%{http_code}\n' https://<host>/metrics
@@ -210,7 +210,7 @@ Do not tick a box you have not personally verified.
 - [ ] **Road distances manually validated against Google Maps** (3.8).
 - [ ] Bootstrap admin password changed; real user accounts created with correct roles.
 - [ ] TLS live; HSTS enabled; API docs off (3.9).
-- [ ] No API key in the frontend bundle (3.10).
+- [ ] Server key is absent from the frontend bundle; browser key is referrer-restricted (3.10).
 - [ ] Prometheus scraping; alert rules loaded; alert routing tested with a deliberate failure.
 - [ ] Log aggregation receiving structured JSON.
 - [ ] Operations users trained — in particular on `ROUTE_CALCULATION_ERROR` (retry, it is not a rejection) and on `LOCATION_VERIFICATION_REQUIRED` (drag the marker and confirm).

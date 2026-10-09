@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 
 import { ApiError, api } from '../api/client'
+import { addressWithContext } from '../lib/address'
 import type { AddressSuggestion, ServiceLocation, Warehouse } from '../types/api'
 
 type Kind = 'warehouse' | 'service'
@@ -121,6 +122,8 @@ export function LocationEditorCard({
   const sessionTokenRef = useRef(crypto.randomUUID())
   const debounceRef = useRef<number | undefined>(undefined)
   const geocodeDebounceRef = useRef<number | undefined>(undefined)
+  const autocompleteRequestRef = useRef(0)
+  const geocodeRequestRef = useRef(0)
   const lastGeocodeAttemptRef = useRef('')
   const lastPushedPointRef = useRef<{ latitude: number; longitude: number } | null>(null)
 
@@ -166,13 +169,20 @@ export function LocationEditorCard({
     onActivateWithPoint(lat, lng)
   }
 
-  const resolveAddress = async (address: string) => {
+  const resolveAddress = async (
+    address: string,
+    placeId?: string,
+    sessionToken?: string,
+  ) => {
     if (!address.trim()) return
     lastGeocodeAttemptRef.current = address.trim()
+    const requestId = ++geocodeRequestRef.current
     setGeocoding(true)
     setNotice(null)
     try {
-      const result = await api.geocode(address)
+      const query = addressWithContext(address, form.area, form.city, form.pincode)
+      const result = await api.geocode(query, placeId, sessionToken)
+      if (requestId !== geocodeRequestRef.current) return
       setForm((previous) => ({
         ...previous,
         latitude: result.latitude.toFixed(6),
@@ -186,18 +196,25 @@ export function LocationEditorCard({
         )
       }
     } catch {
+      if (requestId !== geocodeRequestRef.current) return
       setNotice(
         'Unable to locate this address. Please check the address or place the ' +
           'marker manually on the map.',
       )
     } finally {
-      setGeocoding(false)
+      if (requestId === geocodeRequestRef.current) setGeocoding(false)
     }
   }
 
   const onAddressChange = (event: React.ChangeEvent<HTMLTextAreaElement>) => {
     const value = event.target.value
-    setForm((previous) => ({ ...previous, address: value }))
+    const autocompleteRequest = ++autocompleteRequestRef.current
+    geocodeRequestRef.current += 1
+    lastGeocodeAttemptRef.current = ''
+    setForm((previous) => ({ ...previous, address: value, latitude: '', longitude: '' }))
+    setSuggestions([])
+    setShowSuggestions(false)
+    onDeactivate()
     window.clearTimeout(debounceRef.current)
     window.clearTimeout(geocodeDebounceRef.current)
     if (value.trim().length < 3) {
@@ -207,9 +224,11 @@ export function LocationEditorCard({
     debounceRef.current = window.setTimeout(async () => {
       try {
         const results = await api.autocomplete(value, sessionTokenRef.current)
+        if (autocompleteRequest !== autocompleteRequestRef.current) return
         setSuggestions(results)
         setShowSuggestions(true)
       } catch {
+        if (autocompleteRequest !== autocompleteRequestRef.current) return
         setSuggestions([])
       }
     }, 300)
@@ -230,11 +249,16 @@ export function LocationEditorCard({
   }
 
   const chooseSuggestion = async (suggestion: AddressSuggestion) => {
+    autocompleteRequestRef.current += 1
+    geocodeRequestRef.current += 1
+    window.clearTimeout(debounceRef.current)
+    window.clearTimeout(geocodeDebounceRef.current)
     setForm((previous) => ({ ...previous, address: suggestion.description }))
     setShowSuggestions(false)
     setSuggestions([])
+    const sessionToken = sessionTokenRef.current
     sessionTokenRef.current = crypto.randomUUID()
-    await resolveAddress(suggestion.description)
+    await resolveAddress(suggestion.description, suggestion.placeId, sessionToken)
   }
 
   const save = async () => {
@@ -245,8 +269,10 @@ export function LocationEditorCard({
     }
     const latitude = form.latitude ? Number(form.latitude) : undefined
     const longitude = form.longitude ? Number(form.longitude) : undefined
-    if (isNew && (latitude === undefined || longitude === undefined)) {
-      setError('Search an address or place the marker on the map before saving.')
+    const addressChanged =
+      !!current && form.address.trim() !== (current.address ?? '').trim()
+    if ((isNew || addressChanged) && (latitude === undefined || longitude === undefined)) {
+      setError('Resolve the updated address or place its pin on the map before saving.')
       return
     }
 

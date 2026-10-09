@@ -18,6 +18,15 @@ you the contents without actually unpacking them, and nothing will work.
 
 STEP 2 - RUN THE LAUNCHER
 -------------------------
+For worldwide Google Maps address lookup, first create `backend\.env` and add:
+
+    GOOGLE_MAPS_API_KEY=your-server-side-key
+
+Enable the Geocoding API and Places API, and billing, for that key in Google Cloud.
+Leave `GOOGLE_MAPS_REGION` and `GOOGLE_PLACES_COUNTRY_FILTER` empty for worldwide search.
+The key stays on the backend and is never sent to the browser. Without a configured key,
+Google address searches will not work.
+
 Open the extracted folder, then the "serviceability" folder inside it, and
 double-click:
 

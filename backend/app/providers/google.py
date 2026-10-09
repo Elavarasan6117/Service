@@ -13,13 +13,13 @@ receives only the results of these calls.
 from __future__ import annotations
 
 from typing import Any
+from urllib.parse import quote
 
 import httpx
 
 from app.core.config import settings
 from app.core.enums import DistanceType
 from app.core.errors import (
-    GeocodingAmbiguousError,
     GeocodingNoResultError,
     RoutingProviderError,
     RoutingRateLimitError,
@@ -36,17 +36,13 @@ from app.providers.base import (
 logger = get_logger(__name__)
 
 _BASE = "https://maps.googleapis.com/maps/api"
+_GEOCODING_V4 = "https://geocode.googleapis.com/v4/geocode"
+_PLACES_V1 = "https://places.googleapis.com/v1"
 
 # Google's Distance Matrix limit is 25 destinations per request (and 100
 # elements). We chunk to stay inside it; CANDIDATE_MAX_COUNT is normally well
 # below this, so chunking is a safety net rather than the usual path.
 _MAX_DESTINATIONS_PER_REQUEST = 25
-
-# Location-type values that indicate the geocoder pinpointed the address rather
-# than interpolating or falling back to a wider area.
-_HIGH_CONFIDENCE = {"ROOFTOP"}
-_MEDIUM_CONFIDENCE = {"RANGE_INTERPOLATED", "GEOMETRIC_CENTER"}
-
 
 class GoogleMapsProvider:
     """Implements both RoutingProvider and GeocodingProvider."""
@@ -97,7 +93,6 @@ class GoogleMapsProvider:
             )
         response.raise_for_status()
         payload: dict[str, Any] = response.json()
-
         status_value = payload.get("status")
         if status_value in ("OVER_QUERY_LIMIT", "OVER_DAILY_LIMIT"):
             # Quota exhaustion. This is the failure mode that must surface as
@@ -113,6 +108,51 @@ class GoogleMapsProvider:
                 code=f"PROVIDER_{status_value}",
             )
         return payload
+
+    async def _request_json(
+        self,
+        method: str,
+        url: str,
+        *,
+        params: dict[str, Any] | None = None,
+        body: dict[str, Any] | None = None,
+        field_mask: str | None = None,
+    ) -> dict[str, Any]:
+        if not self.api_key:
+            raise RoutingProviderError(
+                "GOOGLE_MAPS_API_KEY is not configured.",
+                code="PROVIDER_NOT_CONFIGURED",
+            )
+        headers = {"X-Goog-Api-Key": self.api_key}
+        if body is not None:
+            headers["Content-Type"] = "application/json"
+        if field_mask:
+            headers["X-Goog-FieldMask"] = field_mask
+        response = await self.client.request(
+            method, url, params=params, json=body, headers=headers
+        )
+        if response.status_code == 429:
+            raise RoutingRateLimitError()
+        if response.status_code >= 500:
+            raise RoutingProviderError(
+                f"Google returned HTTP {response.status_code}.",
+                code="PROVIDER_HTTP_5XX",
+            )
+        if response.status_code >= 400:
+            try:
+                error_body = response.json().get("error", {})
+            except (ValueError, AttributeError):
+                error_body = {}
+            if response.status_code == 404 or error_body.get("status") == "NOT_FOUND":
+                raise GeocodingNoResultError("Google could not find that address.")
+            message = error_body.get("message") or (
+                f"Google Maps request failed with HTTP {response.status_code}."
+            )
+            raise RoutingProviderError(
+                str(message),
+                code="PROVIDER_REQUEST_FAILED",
+            )
+        return response.json()
 
     # -- routing ---------------------------------------------------------
 
@@ -216,115 +256,203 @@ class GoogleMapsProvider:
     # -- geocoding -------------------------------------------------------
 
     async def geocode(self, address: str) -> GeocodeResult:
-        payload = await self._get(
-            "/geocode/json",
-            {
-                "address": address,
-                "region": settings.GOOGLE_MAPS_REGION,
-                "language": settings.GOOGLE_MAPS_LANGUAGE,
+        search_body: dict[str, Any] = {
+            "textQuery": address,
+            "languageCode": settings.GOOGLE_MAPS_LANGUAGE,
+            # Keep Google's ranked candidate set intact. Asking for only one
+            # result can change which place Google ranks first for ambiguous
+            # queries such as a station name plus a broad postal address.
+            "maxResultCount": 8,
+        }
+        if settings.GOOGLE_MAPS_REGION:
+            search_body["regionCode"] = settings.GOOGLE_MAPS_REGION.upper()
+        search_payload = await self._request_json(
+            "POST",
+            f"{_PLACES_V1}/places:searchText",
+            body=search_body,
+            field_mask=(
+                "places.id,places.displayName,places.formattedAddress,"
+                "places.location,places.addressComponents,places.types,places.viewport"
+            ),
+        )
+        places = search_payload.get("places") or []
+        if places:
+            return self._parse_place_result(
+                places[0], address, provider="google_places_text_search"
+            )
+
+        # Text Search can return no place for a postal or administrative
+        # address. Keep address geocoding as a fallback for those cases.
+        address_query = quote(address, safe=",")
+        payload = await self._request_json(
+            "GET",
+            f"{_GEOCODING_V4}/address/{address_query}",
+            params={
+                "languageCode": settings.GOOGLE_MAPS_LANGUAGE,
                 **(
-                    {"components": f"country:{settings.GOOGLE_PLACES_COUNTRY_FILTER}"}
-                    if settings.GOOGLE_PLACES_COUNTRY_FILTER.strip()
+                    {"regionCode": settings.GOOGLE_MAPS_REGION.upper()}
+                    if settings.GOOGLE_MAPS_REGION
                     else {}
                 ),
             },
         )
-        status_value = payload.get("status")
-        results = payload.get("results") or []
+        return self._parse_geocode_result(payload, address, provider=self.name)
 
-        if status_value == "ZERO_RESULTS" or not results:
+    async def geocode_place(
+        self, place_id: str, address: str, session_token: str | None = None
+    ) -> GeocodeResult:
+        params = {"sessionToken": session_token} if session_token else None
+        payload = await self._request_json(
+            "GET",
+            f"{_PLACES_V1}/places/{quote(place_id, safe='')}",
+            params=params,
+            field_mask=(
+                "id,displayName,formattedAddress,location,addressComponents,"
+                "viewport,types,plusCode,googleMapsUri"
+            ),
+        )
+        return self._parse_place_result(payload, address)
+
+    @staticmethod
+    def _components(items: list[dict[str, Any]]) -> dict[str, str]:
+        components: dict[str, str] = {}
+        for component in items:
+            value = component.get("longText") or component.get("long_name")
+            for component_type in component.get("types", []):
+                if value:
+                    components[component_type] = value
+        return components
+
+    @classmethod
+    def _parse_geocode_result(
+        cls, payload: dict[str, Any], address: str, *, provider: str
+    ) -> GeocodeResult:
+        results = payload.get("results") or []
+        if not results:
             raise GeocodingNoResultError(
                 f"No location found for: {address}",
             )
 
         best = results[0]
-        geometry = best.get("geometry", {})
-        location = geometry.get("location", {})
-        location_type = geometry.get("location_type", "")
+        location = best.get("location") or {}
+        if "latitude" not in location or "longitude" not in location:
+            raise RoutingProviderError(
+                "Google returned an address without map coordinates.",
+                code="PROVIDER_EMPTY_RESPONSE",
+            )
+        granularity = best.get("granularity", "APPROXIMATE")
 
-        if location_type in _HIGH_CONFIDENCE:
+        if granularity in {"ROOFTOP", "PREMISE"}:
             confidence = "high"
-        elif location_type in _MEDIUM_CONFIDENCE:
+        elif granularity in {"RANGE_INTERPOLATED", "GEOMETRIC_CENTER"}:
             confidence = "medium"
         else:
             confidence = "low"
 
-        partial = bool(best.get("partial_match", False))
-
-        # More than one result with an imprecise match is genuinely ambiguous:
-        # picking the first one silently would place the customer at a guess.
-        if len(results) > 1 and confidence == "low":
-            raise GeocodingAmbiguousError(
-                f"Address '{address}' matched {len(results)} locations imprecisely."
-            )
-
-        components = {
-            comp["types"][0]: comp.get("long_name", "")
-            for comp in best.get("address_components", [])
-            if comp.get("types")
-        }
+        components = cls._components(best.get("addressComponents", []))
 
         return GeocodeResult(
-            latitude=float(location["lat"]),
-            longitude=float(location["lng"]),
-            formatted_address=best.get("formatted_address", address),
+            latitude=float(location["latitude"]),
+            longitude=float(location["longitude"]),
+            formatted_address=best.get("formattedAddress", address),
             confidence=confidence,
-            partial_match=partial,
-            place_id=best.get("place_id"),
+            partial_match=confidence == "low",
+            place_id=best.get("placeId"),
             components=components,
-            provider=self.name,
+            provider=provider,
+            details=best,
+        )
+
+    @classmethod
+    def _parse_place_result(
+        cls,
+        place: dict[str, Any],
+        fallback_address: str,
+        *,
+        provider: str = "google_places_v1",
+    ) -> GeocodeResult:
+        location = place.get("location") or {}
+        if "latitude" not in location or "longitude" not in location:
+            raise GeocodingNoResultError(f"No map location found for: {fallback_address}")
+        types = place.get("types", [])
+        exact_place_types = {
+            "street_address",
+            "premise",
+            "subpremise",
+            "establishment",
+            "point_of_interest",
+        }
+        confidence = "high" if exact_place_types.intersection(types) else "medium"
+        display_name = place.get("displayName", {}).get("text")
+        return GeocodeResult(
+            latitude=float(location["latitude"]),
+            longitude=float(location["longitude"]),
+            formatted_address=place.get("formattedAddress") or fallback_address,
+            confidence=confidence,
+            place_id=place.get("id"),
+            components=cls._components(place.get("addressComponents", [])),
+            provider=provider,
+            details={**place, "displayNameText": display_name},
         )
 
     async def reverse_geocode(self, lat: float, lng: float) -> GeocodeResult:
-        payload = await self._get(
-            "/geocode/json",
-            {
-                "latlng": f"{lat},{lng}",
-                "language": settings.GOOGLE_MAPS_LANGUAGE,
-            },
+        payload = await self._request_json(
+            "GET",
+            f"{_GEOCODING_V4}/location/{lat},{lng}",
+            params={"languageCode": settings.GOOGLE_MAPS_LANGUAGE},
         )
-        results = payload.get("results") or []
-        if not results:
+        if not payload.get("results"):
             raise GeocodingNoResultError(f"No address found at {lat},{lng}")
-        best = results[0]
+        result = self._parse_geocode_result(
+            payload, f"{lat},{lng}", provider=self.name
+        )
         return GeocodeResult(
             latitude=lat,
             longitude=lng,
-            formatted_address=best.get("formatted_address", ""),
-            confidence="high",
-            place_id=best.get("place_id"),
+            formatted_address=result.formatted_address,
+            confidence=result.confidence,
+            partial_match=result.partial_match,
+            place_id=result.place_id,
+            components=result.components,
             provider=self.name,
+            details=result.details,
         )
 
     async def autocomplete(
         self, query: str, session_token: str | None = None
     ) -> list[AddressSuggestion]:
-        params: dict[str, Any] = {
+        body: dict[str, Any] = {
             "input": query,
-            "components": f"country:{settings.GOOGLE_PLACES_COUNTRY_FILTER}",
-            "language": settings.GOOGLE_MAPS_LANGUAGE,
-            # Bias toward Chennai without hard-restricting, so a nearby
-            # suburb outside the city boundary still appears.
-            "location": f"{settings.MAP_DEFAULT_CENTER_LAT},{settings.MAP_DEFAULT_CENTER_LNG}",
-            "radius": 50000,
+            "languageCode": settings.GOOGLE_MAPS_LANGUAGE,
         }
+        if settings.GOOGLE_MAPS_REGION:
+            body["regionCode"] = settings.GOOGLE_MAPS_REGION.upper()
         if session_token:
-            # Session tokens group keystrokes into one billable session.
-            params["sessiontoken"] = session_token
-
-        payload = await self._get("/place/autocomplete/json", params)
-        if payload.get("status") == "ZERO_RESULTS":
-            return []
+            body["sessionToken"] = session_token
+        payload = await self._request_json(
+            "POST",
+            f"{_PLACES_V1}/places:autocomplete",
+            body=body,
+            field_mask=(
+                "suggestions.placePrediction.placeId,suggestions.placePrediction.text,"
+                "suggestions.placePrediction.structuredFormat"
+            ),
+        )
 
         suggestions = []
-        for pred in payload.get("predictions", []):
-            fmt = pred.get("structured_formatting", {})
+        for item in payload.get("suggestions", []):
+            prediction = item.get("placePrediction")
+            if not prediction:
+                continue
+            fmt = prediction.get("structuredFormat", {})
+            main = (fmt.get("mainText") or {}).get("text", "")
+            secondary = (fmt.get("secondaryText") or {}).get("text", "")
             suggestions.append(
                 AddressSuggestion(
-                    description=pred.get("description", ""),
-                    place_id=pred.get("place_id", ""),
-                    main_text=fmt.get("main_text", ""),
-                    secondary_text=fmt.get("secondary_text", ""),
+                    description=(prediction.get("text") or {}).get("text", ""),
+                    place_id=prediction.get("placeId", ""),
+                    main_text=main,
+                    secondary_text=secondary,
                 )
             )
         return suggestions

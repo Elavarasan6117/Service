@@ -284,6 +284,16 @@ class ResilientGeocodingProvider:
             breaker=self._breaker,
         )
 
+    async def geocode_place(
+        self, place_id: str, address: str, session_token: str | None = None
+    ) -> GeocodeResult:
+        return await _call_with_retry(
+            lambda: self.inner.geocode_place(place_id, address, session_token),
+            provider=self.name,
+            operation="geocode_place",
+            breaker=self._breaker,
+        )
+
     async def reverse_geocode(self, lat: float, lng: float) -> GeocodeResult:
         return await _call_with_retry(
             lambda: self.inner.reverse_geocode(lat, lng),

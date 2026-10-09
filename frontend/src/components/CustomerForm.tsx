@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 
 import { ApiError, api } from '../api/client'
+import { addressWithContext } from '../lib/address'
 import type {
   AddressSuggestion,
   CustomerCreateResponse,
@@ -78,6 +79,7 @@ export function CustomerForm({
   const sessionTokenRef = useRef(crypto.randomUUID())
   const debounceRef = useRef<number | undefined>(undefined)
   const geocodeDebounceRef = useRef<number | undefined>(undefined)
+  const autocompleteRequestRef = useRef(0)
   const geocodeRequestRef = useRef(0)
   // The address text (trimmed) that the most recent geocode attempt -- in
   // flight or finished, successful or not -- was run for. Lets blur trigger
@@ -117,10 +119,14 @@ export function CustomerForm({
 
   const onAddressChange = (event: React.ChangeEvent<HTMLTextAreaElement>) => {
     const value = event.target.value
+    const autocompleteRequest = ++autocompleteRequestRef.current
     geocodeRequestRef.current += 1
     setForm((previous) => ({
       ...previous,
       address: value,
+      area: '',
+      city: '',
+      pincode: '',
       latitude: '',
       longitude: '',
     }))
@@ -138,9 +144,11 @@ export function CustomerForm({
     debounceRef.current = window.setTimeout(async () => {
       try {
         const results = await api.autocomplete(value, sessionTokenRef.current)
+        if (autocompleteRequest !== autocompleteRequestRef.current) return
         setSuggestions(results)
         setShowSuggestions(true)
       } catch {
+        if (autocompleteRequest !== autocompleteRequestRef.current) return
         setSuggestions([])
       }
     }, 300)
@@ -154,6 +162,9 @@ export function CustomerForm({
 
   const chooseSuggestion = async (suggestion: AddressSuggestion) => {
     geocodeRequestRef.current += 1
+    autocompleteRequestRef.current += 1
+    window.clearTimeout(debounceRef.current)
+    window.clearTimeout(geocodeDebounceRef.current)
     setForm((previous) => ({
       ...previous,
       address: suggestion.description,
@@ -164,12 +175,13 @@ export function CustomerForm({
     onDraftPoint(null)
     setShowSuggestions(false)
     setSuggestions([])
+    const sessionToken = sessionTokenRef.current
     sessionTokenRef.current = crypto.randomUUID()
-    await resolveAddress(suggestion.description)
+    await resolveAddress(suggestion.description, suggestion.placeId, sessionToken)
   }
 
   const resolveAddress = useCallback(
-    async (address: string) => {
+    async (address: string, placeId?: string, sessionToken?: string) => {
       if (!address.trim()) return
       lastGeocodeAttemptRef.current = address.trim()
       const requestId = ++geocodeRequestRef.current
@@ -177,10 +189,33 @@ export function CustomerForm({
       setError(null)
       setNotice(null)
       try {
-        const result = await api.geocode(address)
+        const query = addressWithContext(address, form.area, form.city, form.pincode)
+        const result = await api.geocode(query, placeId, sessionToken)
         if (requestId !== geocodeRequestRef.current) return
+        const componentValue = (...types: string[]) => {
+          const components = result.details.addressComponents
+          if (!Array.isArray(components)) return undefined
+          const component = components.find((item) => {
+            if (!item || typeof item !== 'object') return false
+            const componentTypes = (item as { types?: unknown }).types
+            return (
+              Array.isArray(componentTypes) &&
+              types.some((type) => componentTypes.includes(type))
+            )
+          }) as { longText?: unknown; long_name?: unknown } | undefined
+          const value = component?.longText ?? component?.long_name
+          return typeof value === 'string' ? value : undefined
+        }
         setForm((previous) => ({
           ...previous,
+          address: result.formattedAddress || previous.address,
+          area:
+            componentValue('sublocality', 'neighborhood', 'administrative_area_level_2') ??
+            previous.area,
+          city:
+            componentValue('locality', 'postal_town', 'administrative_area_level_3') ??
+            previous.city,
+          pincode: componentValue('postal_code') ?? previous.pincode,
           latitude: result.latitude.toFixed(6),
           longitude: result.longitude.toFixed(6),
         }))
@@ -205,16 +240,18 @@ export function CustomerForm({
         }
       } catch (exception) {
         if (requestId !== geocodeRequestRef.current) return
-        // Not a failure of the form: the operator can still place the marker.
+        // A provider outage is different from a genuine no-match; don't tell
+        // the operator that a valid address is wrong when the service is down.
         setNotice(
-          'Unable to locate this address. Please check the address or select the ' +
-            'location manually on the map.',
+          exception instanceof ApiError && exception.status >= 500
+            ? 'Address search is temporarily unavailable. Please retry shortly or select the location manually on the map.'
+            : 'Unable to locate this address. Please check the address or select the location manually on the map.',
         )
       } finally {
         setGeocoding(false)
       }
     },
-    [form.serviceType, onDraftPoint, onPreviewResult],
+    [form.area, form.city, form.pincode, form.serviceType, onDraftPoint, onPreviewResult],
   )
 
   const handleAddressBlur = () => {
@@ -245,7 +282,13 @@ export function CustomerForm({
       // ensures a newly entered address has a map point before it is created.
       if (latitude === undefined && longitude === undefined && form.address.trim()) {
         try {
-          const resolved = await api.geocode(form.address.trim())
+          const query = addressWithContext(
+            form.address,
+            form.area,
+            form.city,
+            form.pincode,
+          )
+          const resolved = await api.geocode(query)
           latitude = resolved.latitude
           longitude = resolved.longitude
           setForm((previous) => ({

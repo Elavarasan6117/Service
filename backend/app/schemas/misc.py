@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import uuid
 from datetime import date, datetime
+from typing import Any
 
 from pydantic import Field
 
@@ -283,6 +284,8 @@ class DashboardMetrics(CamelModel):
 
 class GeocodeRequest(CamelModel):
     address: str = Field(..., min_length=3, max_length=2000)
+    place_id: str | None = Field(None, max_length=512)
+    session_token: str | None = Field(None, max_length=128)
 
 
 class GeocodeResponse(CamelModel):
@@ -293,6 +296,7 @@ class GeocodeResponse(CamelModel):
     partial_match: bool
     needs_verification: bool
     provider: str
+    details: dict[str, Any] = Field(default_factory=dict)
 
 
 class ReverseGeocodeRequest(CamelModel):

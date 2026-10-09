@@ -39,7 +39,9 @@ services:
       - key: ROUTING_PROVIDER
         value: fake
       - key: GEOCODING_PROVIDER
-        value: photon
+        value: google_maps
+      - key: GOOGLE_MAPS_API_KEY
+        sync: false
       # No Redis is provisioned here -- every cache/rate-limit/live-event path
       # in this codebase degrades to a no-op when Redis is unreachable (see
       # app/services/cache.py, app/services/events.py), so pointing this at a
@@ -79,6 +81,10 @@ services:
       # manual redeploy of this static site (it's a build-time value, baked
       # into the bundle, so changing the env var alone does not take effect).
       - key: VITE_API_BASE_URL
+        sync: false
+      # This is a browser key. Restrict it to the deployed site hostname and
+      # the Maps JavaScript API in Google Cloud Console.
+      - key: VITE_GOOGLE_MAPS_API_KEY
         sync: false
     routes:
       - type: rewrite

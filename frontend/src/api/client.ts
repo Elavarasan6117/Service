@@ -81,12 +81,13 @@ export function hasStoredSession(): boolean {
 }
 
 async function attemptRefresh(): Promise<boolean> {
-  let stored: string | null = null
-  try {
-    stored = localStorage.getItem(REFRESH_KEY)
-  } catch {
-    return false
-  }
+  const stored = (() => {
+    try {
+      return localStorage.getItem(REFRESH_KEY)
+    } catch {
+      return null
+    }
+  })()
   if (!stored) return false
 
   try {
@@ -245,16 +246,17 @@ export const api = {
       `/geocoding/autocomplete${qs({ q, session_token: sessionToken })}`,
     ),
 
-  geocode: (address: string) =>
+  geocode: (address: string, placeId?: string, sessionToken?: string) =>
     request<{
       latitude: number
       longitude: number
       formattedAddress: string
       confidence: string
       needsVerification: boolean
+      details: Record<string, unknown>
     }>('/geocoding/geocode', {
       method: 'POST',
-      body: JSON.stringify({ address }),
+      body: JSON.stringify({ address, placeId, sessionToken }),
     }),
 
   reverseGeocode: (latitude: number, longitude: number) =>
