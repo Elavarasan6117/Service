@@ -105,7 +105,7 @@ export function QuickAddLocationForm({
     setGeocoding(true)
     setNotice(null)
     try {
-      const query = addressWithContext(value, 'Chennai', 'India')
+      const query = addressWithContext(value, 'India')
       const result = await api.geocode(query, placeId, sessionToken)
       if (requestId !== geocodeRequestRef.current) return
       setLatitude(result.latitude.toFixed(6))
