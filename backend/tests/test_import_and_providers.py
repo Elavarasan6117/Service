@@ -349,6 +349,58 @@ async def test_resilient_wrapper_falls_back_to_secondary_provider(monkeypatch):
     assert legs[0].provider == "fake"
 
 
+async def test_google_geocoder_uses_photon_fallback_with_verification(monkeypatch):
+    from app.providers.registry import _build_geocoding
+
+    monkeypatch.setattr("app.core.config.settings.GEOCODING_PROVIDER", "google_maps")
+    provider = _build_geocoding()
+
+    assert provider.name == "google_maps"
+    assert provider.inner.name == "google_maps"
+    assert provider.fallback.name == "photon"
+    await provider.close()
+
+
+async def test_geocoding_provider_fallback_places_pin_as_approximate(monkeypatch):
+    from app.core.errors import RoutingProviderError
+    from app.providers.fake import FakeGeocodingProvider
+    from app.providers.resilience import ResilientGeocodingProvider
+
+    class UnavailableGeocoder:
+        name = "google_maps"
+
+        async def geocode(self, address):
+            raise RoutingProviderError("Google API key is not configured")
+
+        async def geocode_place(self, place_id, address, session_token=None):
+            raise RoutingProviderError("Google API key is not configured")
+
+        async def reverse_geocode(self, lat, lng):
+            raise RoutingProviderError("Google API key is not configured")
+
+        async def autocomplete(self, query, session_token=None):
+            raise RoutingProviderError("Google API key is not configured")
+
+        async def health_check(self):
+            return False
+
+        async def close(self):
+            return None
+
+    monkeypatch.setattr("app.core.config.settings.PROVIDER_MAX_RETRIES", 1)
+    monkeypatch.setattr("app.core.config.settings.PROVIDER_CIRCUIT_FAIL_THRESHOLD", 10)
+    fallback = FakeGeocodingProvider()
+    provider = ResilientGeocodingProvider(UnavailableGeocoder(), fallback=fallback)
+
+    result = await provider.geocode("Guest House Road, Chennai")
+    suggestions = await provider.autocomplete("Guest House Road")
+
+    assert result.provider == "fake"
+    assert result.needs_verification
+    assert result.confidence == "low"
+    assert suggestions[0].description.startswith("Guest House Road")
+
+
 # --- Coordinate value object -------------------------------------------
 
 

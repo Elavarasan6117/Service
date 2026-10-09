@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import random
 import time
+from dataclasses import replace
 from typing import Any, Awaitable, Callable, TypeVar
 
 import httpx
@@ -267,53 +268,101 @@ class ResilientRoutingProvider:
 
 
 class ResilientGeocodingProvider:
-    def __init__(self, inner: Any) -> None:
+    def __init__(self, inner: Any, fallback: Any | None = None) -> None:
         self.inner = inner
+        self.fallback = fallback
         self.name = inner.name
         self._breaker = CircuitBreaker(
             f"{inner.name}_geocoding",
             settings.PROVIDER_CIRCUIT_FAIL_THRESHOLD,
             settings.PROVIDER_CIRCUIT_RESET_SECONDS,
         )
+        self._fallback_breaker = (
+            CircuitBreaker(
+                f"{fallback.name}_geocoding",
+                settings.PROVIDER_CIRCUIT_FAIL_THRESHOLD,
+                settings.PROVIDER_CIRCUIT_RESET_SECONDS,
+            )
+            if fallback
+            else None
+        )
+
+    async def _with_fallback(
+        self,
+        call: Callable[[], Awaitable[T]],
+        fallback_call: Callable[[], Awaitable[T]],
+        operation: str,
+    ) -> tuple[T, bool]:
+        try:
+            result = await _call_with_retry(
+                call,
+                provider=self.name,
+                operation=operation,
+                breaker=self._breaker,
+            )
+            return result, False
+        except ProviderError:
+            if self.fallback is None:
+                raise
+            logger.warning(
+                "geocoding_fallback_engaged",
+                primary=self.name,
+                fallback=self.fallback.name,
+                operation=operation,
+            )
+            assert self._fallback_breaker is not None
+            result = await _call_with_retry(
+                fallback_call,
+                provider=self.fallback.name,
+                operation=operation,
+                breaker=self._fallback_breaker,
+            )
+            return result, True
 
     async def geocode(self, address: str) -> GeocodeResult:
-        return await _call_with_retry(
+        result, used_fallback = await self._with_fallback(
             lambda: self.inner.geocode(address),
-            provider=self.name,
-            operation="geocode",
-            breaker=self._breaker,
+            lambda: self.fallback.geocode(address),
+            "geocode",
         )
+        if used_fallback:
+            return replace(result, confidence="low", partial_match=True)
+        return result
 
     async def geocode_place(
         self, place_id: str, address: str, session_token: str | None = None
     ) -> GeocodeResult:
-        return await _call_with_retry(
+        result, used_fallback = await self._with_fallback(
             lambda: self.inner.geocode_place(place_id, address, session_token),
-            provider=self.name,
-            operation="geocode_place",
-            breaker=self._breaker,
+            lambda: self.fallback.geocode(address),
+            "geocode_place",
         )
+        if used_fallback:
+            return replace(result, confidence="low", partial_match=True)
+        return result
 
     async def reverse_geocode(self, lat: float, lng: float) -> GeocodeResult:
-        return await _call_with_retry(
+        result, _ = await self._with_fallback(
             lambda: self.inner.reverse_geocode(lat, lng),
-            provider=self.name,
-            operation="reverse_geocode",
-            breaker=self._breaker,
+            lambda: self.fallback.reverse_geocode(lat, lng),
+            "reverse_geocode",
         )
+        return result
 
     async def autocomplete(
         self, query: str, session_token: str | None = None
     ) -> list[AddressSuggestion]:
-        return await _call_with_retry(
+        results, _ = await self._with_fallback(
             lambda: self.inner.autocomplete(query, session_token),
-            provider=self.name,
-            operation="autocomplete",
-            breaker=self._breaker,
+            lambda: self.fallback.autocomplete(query, session_token),
+            "autocomplete",
         )
+        return results
 
     async def health_check(self) -> bool:
         return await self.inner.health_check()
 
     async def close(self) -> None:
         await self.inner.close()
+        if self.fallback is not None:
+            await self.fallback.close()

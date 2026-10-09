@@ -73,8 +73,13 @@ def _build_geocoding() -> ResilientGeocodingProvider:
             f"Unknown GEOCODING_PROVIDER '{key}'. "
             f"Available: {', '.join(sorted(_GEOCODING_FACTORIES))}."
         )
-    logger.info("geocoding_provider_selected", provider=key)
-    return ResilientGeocodingProvider(factory())
+    fallback = PhotonProvider() if key == "google_maps" else None
+    logger.info(
+        "geocoding_provider_selected",
+        provider=key,
+        fallback=fallback.name if fallback else None,
+    )
+    return ResilientGeocodingProvider(factory(), fallback=fallback)
 
 
 def get_routing_provider() -> ResilientRoutingProvider:
