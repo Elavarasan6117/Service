@@ -385,8 +385,6 @@ button, input, select, textarea { font: inherit; color: inherit; }
   width: 100%;
   background: var(--surface-2);
 }
-.map-canvas .leaflet-container { height: 100%; width: 100%; font: inherit; }
-.map-canvas .map-marker-icon { border: 0; background: transparent; }
 @media (max-width: 1100px) { .map-shell { height: 420px; } }
 
 .map-destinations {
