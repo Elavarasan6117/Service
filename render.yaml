@@ -87,6 +87,15 @@ services:
       - key: VITE_GOOGLE_MAPS_API_KEY
         value: AIzaSyDhZ8Z-ZNqLmO35a9AuEwQTSf0nENURH90
     routes:
+      # React Router owns these URLs. Keep the direct routes explicit so the
+      # locations and administration pages also work when opened or refreshed
+      # directly; the catch-all below covers nested/future client-side routes.
+      - type: rewrite
+        source: /locations
+        destination: /index.html
+      - type: rewrite
+        source: /admin
+        destination: /index.html
       - type: rewrite
         source: /*
         destination: /index.html
