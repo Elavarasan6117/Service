@@ -104,6 +104,14 @@ export function OperationsMap({
 
   useEffect(() => {
     let cancelled = false
+    const handleGoogleMapsAuthFailure = () => {
+      if (!cancelled) {
+        setMapError(
+          'Google Maps rejected this browser key. In Google Cloud Console, enable billing and Maps JavaScript API, then allow https://chennai-svc-frontend.onrender.com/* under website restrictions.',
+        )
+      }
+    }
+    window.gm_authFailure = handleGoogleMapsAuthFailure
     void loadGoogleMaps().then(() => {
       if (cancelled || !containerRef.current) return
       const map = new window.google!.maps.Map(containerRef.current, {
@@ -129,6 +137,9 @@ export function OperationsMap({
 
     return () => {
       cancelled = true
+      if (window.gm_authFailure === handleGoogleMapsAuthFailure) {
+        delete window.gm_authFailure
+      }
       for (const entry of staticMarkersRef.current) entry.marker.setMap(null)
       for (const entry of focusMarkersRef.current) entry.marker.setMap(null)
       for (const line of focusLinesRef.current) line.setMap(null)
