@@ -82,6 +82,11 @@ services:
       # into the bundle, so changing the env var alone does not take effect).
       - key: VITE_API_BASE_URL
         sync: false
+      # This is a browser key. Restrict it to the deployed site hostname and
+      # the Maps JavaScript API in Google Cloud Console. Set it in Render's
+      # environment and redeploy the static site after changing the value.
+      - key: VITE_GOOGLE_MAPS_API_KEY
+        sync: false
     routes:
       # React Router owns these URLs. Keep the direct routes explicit so the
       # locations and administration pages also work when opened or refreshed
