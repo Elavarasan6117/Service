@@ -1,8 +1,10 @@
 import { useEffect, useRef, useState } from 'react'
+import L from 'leaflet'
+import type { LayerGroup, Map as LeafletMap, Marker } from 'leaflet'
 
 import type { MapOperations, ServiceabilityResult } from '../types/api'
-import { STATUS_MARKER_COLOR } from './StatusBadge'
 import { decodePolyline } from '../lib/polyline'
+import { STATUS_MARKER_COLOR } from './StatusBadge'
 
 interface Props {
   data: MapOperations | null
@@ -15,54 +17,21 @@ interface Props {
   onEditorDragEnd?: (id: string, latitude: number, longitude: number) => void
 }
 
-type MarkerEntry = { marker: google.maps.Marker; info?: google.maps.InfoWindow }
+const TILE_URL = 'https://tile.openstreetmap.org/{z}/{x}/{y}.png'
+const TILE_ATTRIBUTION = '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap contributors</a>'
 
-let googleMapsPromise: Promise<void> | null = null
-
-// Render's static-site blueprint may be deployed independently from its
-// environment sync. Keep the explicitly configured browser key as a fallback
-// so a missing build-time VITE variable cannot blank the live map.
-const GOOGLE_MAPS_BROWSER_KEY = 'AIzaSyDhZ8Z-ZNqLmO35a9AuEwQTSf0nENURH90'
-
-function loadGoogleMaps(): Promise<void> {
-  if (window.google?.maps) return Promise.resolve()
-  if (googleMapsPromise) return googleMapsPromise
-
-  const apiKey = import.meta.env.VITE_GOOGLE_MAPS_API_KEY || GOOGLE_MAPS_BROWSER_KEY
-  if (!apiKey) return Promise.reject(new Error('Google Maps key is missing. Set VITE_GOOGLE_MAPS_API_KEY in the frontend build environment.'))
-
-  googleMapsPromise = new Promise((resolve, reject) => {
-    const callbackName = '__serviceabilityGoogleMapsReady'
-    const callbackHost = window as unknown as Record<string, () => void>
-    callbackHost[callbackName] = () => {
-      delete callbackHost[callbackName]
-      resolve()
-    }
-    const script = document.createElement('script')
-    script.src = `https://maps.googleapis.com/maps/api/js?key=${encodeURIComponent(apiKey)}&callback=${callbackName}&loading=async`
-    script.async = true
-    script.defer = true
-    script.onerror = () => {
-      delete callbackHost[callbackName]
-      googleMapsPromise = null
-      reject(new Error('Google Maps could not load. Check that this key has Maps JavaScript API enabled and is allowed for this site.'))
-    }
-    document.head.appendChild(script)
-  })
-  return googleMapsPromise
-}
-
-function markerIcon(color: string, radius: number, square = false): google.maps.MarkerIcon {
+function markerIcon(color: string, radius: number, square = false): L.DivIcon {
   const size = radius * 2
   const shape = square
     ? `<rect x="1" y="1" width="${size - 2}" height="${size - 2}" rx="4" fill="${color}" stroke="#ffffff" stroke-width="2"/><text x="${radius}" y="${radius + 4}" text-anchor="middle" font-family="Arial,sans-serif" font-size="${Math.max(10, radius)}" font-weight="700" fill="#ffffff">W</text>`
     : `<circle cx="${radius}" cy="${radius}" r="${radius - 2}" fill="${color}" stroke="#ffffff" stroke-width="2"/>`
   const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="${size}" height="${size}" viewBox="0 0 ${size} ${size}">${shape}</svg>`
-  return {
-    url: `data:image/svg+xml;charset=UTF-8,${encodeURIComponent(svg)}`,
-    scaledSize: new window.google!.maps.Size(size, size),
-    anchor: new window.google!.maps.Point(radius, radius),
-  }
+  return L.divIcon({
+    className: 'map-marker-icon',
+    html: svg,
+    iconSize: [size, size],
+    iconAnchor: [radius, radius],
+  })
 }
 
 function escapeHtml(value: string): string {
@@ -85,12 +54,12 @@ export function OperationsMap({
   onEditorDragEnd,
 }: Props) {
   const containerRef = useRef<HTMLDivElement | null>(null)
-  const mapRef = useRef<google.maps.Map | null>(null)
-  const staticMarkersRef = useRef<MarkerEntry[]>([])
-  const draftMarkerRef = useRef<google.maps.Marker | null>(null)
-  const editorMarkersRef = useRef<Map<string, google.maps.Marker>>(new Map())
-  const focusMarkersRef = useRef<MarkerEntry[]>([])
-  const focusLinesRef = useRef<google.maps.Polyline[]>([])
+  const mapRef = useRef<LeafletMap | null>(null)
+  const staticMarkersRef = useRef<LayerGroup | null>(null)
+  const focusMarkersRef = useRef<LayerGroup | null>(null)
+  const focusLinesRef = useRef<LayerGroup | null>(null)
+  const draftMarkerRef = useRef<Marker | null>(null)
+  const editorMarkersRef = useRef<Map<string, Marker>>(new Map())
   const onMapClickRef = useRef(onMapClick)
   const onDragEndRef = useRef(onDragEnd)
   const onEditorDragEndRef = useRef(onEditorDragEnd)
@@ -103,91 +72,65 @@ export function OperationsMap({
   useEffect(() => { onEditorDragEndRef.current = onEditorDragEnd }, [onEditorDragEnd])
 
   useEffect(() => {
-    let cancelled = false
-    const handleGoogleMapsAuthFailure = () => {
-      if (!cancelled) {
-        setMapError(
-          'Google Maps rejected this browser key. In Google Cloud Console, enable billing and Maps JavaScript API, then allow https://chennai-svc-frontend.onrender.com/* under website restrictions.',
-        )
-      }
-    }
-    window.gm_authFailure = handleGoogleMapsAuthFailure
-    void loadGoogleMaps().then(() => {
-      if (cancelled || !containerRef.current) return
-      const map = new window.google!.maps.Map(containerRef.current, {
-        center: { lat: data?.center.latitude ?? 13.0827, lng: data?.center.longitude ?? 80.2707 },
-        zoom: data?.zoom ?? 12,
-        fullscreenControl: true,
-        mapTypeControl: false,
-        streetViewControl: false,
-        clickableIcons: false,
-      })
-      mapRef.current = map
-      setMapReady(true)
-      map.addListener('click', (event) => {
-        if (!event.latLng) return
-        onMapClickRef.current?.(
-          Number(event.latLng.lat().toFixed(6)),
-          Number(event.latLng.lng().toFixed(6)),
-        )
-      })
-    }).catch((error: unknown) => {
-      if (!cancelled) setMapError(error instanceof Error ? error.message : 'Google Maps could not load.')
+    if (!containerRef.current) return
+
+    const map = L.map(containerRef.current, {
+      center: [data?.center.latitude ?? 13.0827, data?.center.longitude ?? 80.2707],
+      zoom: data?.zoom ?? 12,
+      zoomControl: true,
+      scrollWheelZoom: true,
     })
+    mapRef.current = map
+    staticMarkersRef.current = L.layerGroup().addTo(map)
+    focusMarkersRef.current = L.layerGroup().addTo(map)
+    focusLinesRef.current = L.layerGroup().addTo(map)
+
+    const tiles = L.tileLayer(TILE_URL, {
+      maxZoom: 19,
+      attribution: TILE_ATTRIBUTION,
+    }).addTo(map)
+    tiles.on('tileerror', () => setMapError('Map tiles could not be loaded. Check your internet connection and try again.'))
+    tiles.on('load', () => setMapError(null))
+
+    map.on('click', (event) => {
+      onMapClickRef.current?.(
+        Number(event.latlng.lat.toFixed(6)),
+        Number(event.latlng.lng.toFixed(6)),
+      )
+    })
+    setMapReady(true)
 
     return () => {
-      cancelled = true
-      if (window.gm_authFailure === handleGoogleMapsAuthFailure) {
-        delete window.gm_authFailure
-      }
-      for (const entry of staticMarkersRef.current) entry.marker.setMap(null)
-      for (const entry of focusMarkersRef.current) entry.marker.setMap(null)
-      for (const line of focusLinesRef.current) line.setMap(null)
-      draftMarkerRef.current?.setMap(null)
-      for (const marker of editorMarkersRef.current.values()) marker.setMap(null)
-      staticMarkersRef.current = []
-      focusMarkersRef.current = []
-      focusLinesRef.current = []
+      map.remove()
+      mapRef.current = null
+      staticMarkersRef.current = null
+      focusMarkersRef.current = null
+      focusLinesRef.current = null
       draftMarkerRef.current = null
       editorMarkersRef.current.clear()
-      mapRef.current = null
+      setMapReady(false)
     }
   }, [])
 
   useEffect(() => {
     const map = mapRef.current
-    if (!map || !data) return
-    for (const entry of staticMarkersRef.current) entry.marker.setMap(null)
-    staticMarkersRef.current = []
+    const markers = staticMarkersRef.current
+    if (!map || !markers || !data) return
+    markers.clearLayers()
 
     for (const warehouse of data.warehouses) {
-      const marker = new window.google!.maps.Marker({
-        map,
-        position: { lat: warehouse.latitude, lng: warehouse.longitude },
-        title: warehouse.warehouseName,
+      L.marker([warehouse.latitude, warehouse.longitude], {
         icon: markerIcon('#4b2e83', 10, true),
-        label: { text: 'W', color: '#ffffff', fontSize: '10px', fontWeight: '700' },
-      })
-      const info = new window.google!.maps.InfoWindow({
-        content: `<strong>${escapeHtml(warehouse.warehouseName)}</strong><br/>Warehouse · ${escapeHtml(warehouse.warehouseCode)}`,
-      })
-      marker.addListener('click', () => info.open({ map, anchor: marker }))
-      staticMarkersRef.current.push({ marker, info })
+        title: warehouse.warehouseName,
+      }).bindPopup(`<strong>${escapeHtml(warehouse.warehouseName)}</strong><br/>Warehouse · ${escapeHtml(warehouse.warehouseCode)}`).addTo(markers)
     }
 
     for (const location of data.serviceLocations) {
       if (location.latitude == null || location.longitude == null) continue
-      const marker = new window.google!.maps.Marker({
-        map,
-        position: { lat: location.latitude, lng: location.longitude },
-        title: location.locationName,
+      L.marker([location.latitude, location.longitude], {
         icon: markerIcon('#1a5fa8', 7),
-      })
-      const info = new window.google!.maps.InfoWindow({
-        content: `<strong>${escapeHtml(location.locationName)}</strong><br/>Existing service · ${escapeHtml(location.serviceCode)}<br/>${escapeHtml(location.serviceArea ?? location.area ?? '')}`,
-      })
-      marker.addListener('click', () => info.open({ map, anchor: marker }))
-      staticMarkersRef.current.push({ marker, info })
+        title: location.locationName,
+      }).bindPopup(`<strong>${escapeHtml(location.locationName)}</strong><br/>Existing service · ${escapeHtml(location.serviceCode)}<br/>${escapeHtml(location.serviceArea ?? location.area ?? '')}`).addTo(markers)
     }
 
     for (const customer of data.customers) {
@@ -195,17 +138,10 @@ export function OperationsMap({
       const distance = customer.nearestServiceDistanceMeters != null
         ? `${(customer.nearestServiceDistanceMeters / 1000).toFixed(2)} km by road`
         : 'no road distance recorded'
-      const marker = new window.google!.maps.Marker({
-        map,
-        position: { lat: customer.latitude, lng: customer.longitude },
-        title: customer.customerName,
+      L.marker([customer.latitude, customer.longitude], {
         icon: markerIcon(color, 9),
-      })
-      const info = new window.google!.maps.InfoWindow({
-        content: `<strong>${escapeHtml(customer.customerName)}</strong><br/>${escapeHtml(customer.customerCode)}<br/><b>${escapeHtml(customer.serviceStatus.replace(/_/g, ' '))}</b><br/>${distance}`,
-      })
-      marker.addListener('click', () => info.open({ map, anchor: marker }))
-      staticMarkersRef.current.push({ marker, info })
+        title: customer.customerName,
+      }).bindPopup(`<strong>${escapeHtml(customer.customerName)}</strong><br/>${escapeHtml(customer.customerCode)}<br/><b>${escapeHtml(customer.serviceStatus.replace(/_/g, ' '))}</b><br/>${distance}`).addTo(markers)
     }
   }, [data, mapReady])
 
@@ -213,32 +149,31 @@ export function OperationsMap({
     const map = mapRef.current
     if (!map) return
     if (!draftPoint) {
-      draftMarkerRef.current?.setMap(null)
+      if (draftMarkerRef.current) map.removeLayer(draftMarkerRef.current)
       draftMarkerRef.current = null
       return
     }
-    const position = { lat: draftPoint.latitude, lng: draftPoint.longitude }
+
+    const position: L.LatLngExpression = [draftPoint.latitude, draftPoint.longitude]
     if (!draftMarkerRef.current) {
-      const marker = new window.google!.maps.Marker({
-        map,
-        position,
-        title: 'New customer — drag to correct, then Confirm',
-        draggable,
-        zIndex: 1000,
+      const marker = L.marker(position, {
         icon: markerIcon('#111827', 11),
-      })
-      marker.addListener('dragend', () => {
-        const point = marker.getPosition()
-        if (point) onDragEndRef.current?.(Number(point.lat().toFixed(6)), Number(point.lng().toFixed(6)))
+        draggable,
+        zIndexOffset: 1000,
+        title: 'New customer — drag to correct, then Confirm',
+      }).addTo(map)
+      marker.on('dragend', () => {
+        const point = marker.getLatLng()
+        onDragEndRef.current?.(Number(point.lat.toFixed(6)), Number(point.lng.toFixed(6)))
       })
       draftMarkerRef.current = marker
     } else {
-      draftMarkerRef.current.setMap(map)
-      draftMarkerRef.current.setPosition(position)
-      draftMarkerRef.current.setDraggable(draggable)
+      draftMarkerRef.current.addTo(map).setLatLng(position)
+      if (draggable) draftMarkerRef.current.dragging?.enable()
+      else draftMarkerRef.current.dragging?.disable()
     }
     map.panTo(position)
-    if ((map.getZoom() ?? 0) < 16) map.setZoom(16)
+    if (map.getZoom() < 16) map.setZoom(16)
   }, [draftPoint, draggable, mapReady])
 
   useEffect(() => {
@@ -248,37 +183,32 @@ export function OperationsMap({
     const seenIds = new Set(editorPoints.map((point) => point.id))
     for (const [id, marker] of markers) {
       if (!seenIds.has(id)) {
-        marker.setMap(null)
+        map.removeLayer(marker)
         markers.delete(id)
       }
     }
-    let lastPosition: google.maps.LatLngLiteral | null = null
+
+    let lastPosition: L.LatLngExpression | null = null
     for (const point of editorPoints) {
-      const position = { lat: point.latitude, lng: point.longitude }
+      const position: L.LatLngExpression = [point.latitude, point.longitude]
       lastPosition = position
-      const existing = markers.get(point.id)
-      if (!existing) {
-        const marker = new window.google!.maps.Marker({
-          map,
-          position,
+      let marker = markers.get(point.id)
+      if (!marker) {
+        marker = L.marker(position, {
+          icon: markerIcon(point.kind === 'warehouse' ? '#4b2e83' : '#1a5fa8', point.kind === 'warehouse' ? 10 : 11, point.kind === 'warehouse'),
           draggable: true,
-          zIndex: 1000,
+          zIndexOffset: 1000,
           title: point.kind === 'warehouse'
             ? 'New warehouse — drag to correct, then Save'
             : 'New service location — drag to correct, then Save',
-          icon: markerIcon(point.kind === 'warehouse' ? '#4b2e83' : '#1a5fa8', point.kind === 'warehouse' ? 10 : 11, point.kind === 'warehouse'),
-          label: point.kind === 'warehouse'
-            ? { text: 'W', color: '#ffffff', fontSize: '10px', fontWeight: '700' }
-            : undefined,
-        })
-        marker.addListener('dragend', () => {
-          const dragged = marker.getPosition()
-          if (dragged) onEditorDragEndRef.current?.(point.id, Number(dragged.lat().toFixed(6)), Number(dragged.lng().toFixed(6)))
+        }).addTo(map)
+        marker.on('dragend', () => {
+          const dragged = marker!.getLatLng()
+          onEditorDragEndRef.current?.(point.id, Number(dragged.lat.toFixed(6)), Number(dragged.lng.toFixed(6)))
         })
         markers.set(point.id, marker)
       } else {
-        existing.setMap(map)
-        existing.setPosition(position)
+        marker.addTo(map).setLatLng(position)
       }
     }
     if (lastPosition) map.panTo(lastPosition)
@@ -286,66 +216,44 @@ export function OperationsMap({
 
   useEffect(() => {
     const map = mapRef.current
-    if (!map) return
-    for (const entry of focusMarkersRef.current) entry.marker.setMap(null)
-    for (const line of focusLinesRef.current) line.setMap(null)
-    focusMarkersRef.current = []
-    focusLinesRef.current = []
+    const markers = focusMarkersRef.current
+    const lines = focusLinesRef.current
+    if (!map || !markers || !lines) return
+    markers.clearLayers()
+    lines.clearLayers()
     if (!result?.nearestServiceLocation || !draftPoint) return
 
     const nearest = result.nearestServiceLocation
     const color = result.status === 'AVAILABLE' ? '#0f7b3d' : '#b4232b'
     if (nearest.latitude != null && nearest.longitude != null) {
-      const marker = new window.google!.maps.Marker({
-        map,
-        position: { lat: nearest.latitude, lng: nearest.longitude },
-        title: nearest.name,
-        zIndex: 900,
+      L.marker([nearest.latitude, nearest.longitude], {
         icon: markerIcon(color, 11),
-      })
-      const info = new window.google!.maps.InfoWindow({
-        content: `<strong>${escapeHtml(nearest.name)}</strong><br/>Nearest existing service · ${escapeHtml(nearest.serviceCode)}<br/><b>${nearest.distanceKm.toFixed(2)} km by road</b>`,
-      })
-      info.open({ map, anchor: marker })
-      focusMarkersRef.current.push({ marker, info })
+        zIndexOffset: 900,
+        title: nearest.name,
+      }).bindPopup(`<strong>${escapeHtml(nearest.name)}</strong><br/>Nearest existing service · ${escapeHtml(nearest.serviceCode)}<br/><b>${nearest.distanceKm.toFixed(2)} km by road</b>`)
+        .addTo(markers).openPopup()
     }
 
     const points = result.route?.geometry ? decodePolyline(result.route.geometry) : []
     if (points.length > 1) {
-      const path = points.map(([lat, lng]) => ({ lat, lng }))
-      const line = new window.google!.maps.Polyline({
-        map,
-        path,
-        strokeColor: color,
-        strokeOpacity: 0.86,
-        strokeWeight: 5,
-        clickable: false,
-      })
-      focusLinesRef.current.push(line)
-      const bounds = new window.google!.maps.LatLngBounds()
-      for (const point of path) bounds.extend(point)
-      map.fitBounds(bounds, 48)
+      const routeLine = L.polyline(points, {
+        color,
+        opacity: 0.86,
+        weight: 5,
+        interactive: false,
+      }).addTo(lines)
+      map.fitBounds(routeLine.getBounds(), { padding: [48, 48] })
     } else if (nearest.latitude != null && nearest.longitude != null) {
-      const line = new window.google!.maps.Polyline({
-        map,
-        path: [
-          { lat: draftPoint.latitude, lng: draftPoint.longitude },
-          { lat: nearest.latitude, lng: nearest.longitude },
-        ],
-        strokeColor: color,
-        strokeOpacity: 0.7,
-        strokeWeight: 3,
-        icons: [{ icon: { path: 'M 0,-1 0,1', strokeOpacity: 1, scale: 4 }, offset: '0', repeat: '12px' }],
-        clickable: true,
-      })
-      const info = new window.google!.maps.InfoWindow({
-        content: 'Route geometry unavailable — straight line shown for reference only. Road distance is measured separately.',
-      })
-      line.addListener('click', (event) => {
-        if (event.latLng) info.setPosition(event.latLng)
-        info.open({ map })
-      })
-      focusLinesRef.current.push(line)
+      L.polyline([
+        [draftPoint.latitude, draftPoint.longitude],
+        [nearest.latitude, nearest.longitude],
+      ], {
+        color,
+        opacity: 0.7,
+        weight: 3,
+        dashArray: '5 8',
+      }).bindPopup('Route geometry unavailable — straight line shown for reference only. Road distance is measured separately.')
+        .addTo(lines)
     }
   }, [result, draftPoint, mapReady])
 
@@ -367,7 +275,7 @@ export function OperationsMap({
                 aria-pressed={focusedServiceId === location.id}
                 onClick={() => {
                   setFocusedServiceId(location.id)
-                  mapRef.current?.panTo({ lat: location.latitude!, lng: location.longitude! })
+                  mapRef.current?.panTo([location.latitude!, location.longitude!])
                   mapRef.current?.setZoom(15)
                 }}
               >
