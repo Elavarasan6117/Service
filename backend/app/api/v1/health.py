@@ -37,7 +37,8 @@ async def readiness(session: DbSession, response: Response) -> dict:
         await session.execute(text("SELECT 1"))
         checks["database"] = {"status": "ok"}
     except Exception as exc:  # noqa: BLE001
-        checks["database"] = {"status": "error", "detail": str(exc)[:200]}
+        logger.error("readiness_database_failed", error=str(exc))
+        checks["database"] = {"status": "error"}
         ready = False
 
     try:
@@ -46,7 +47,8 @@ async def readiness(session: DbSession, response: Response) -> dict:
     except Exception as exc:  # noqa: BLE001
         # Redis down means no cache and no live dashboard updates, but
         # serviceability decisions still work. Degraded, not unready.
-        checks["redis"] = {"status": "degraded", "detail": str(exc)[:200]}
+        logger.warning("readiness_redis_degraded", error=str(exc))
+        checks["redis"] = {"status": "degraded"}
 
     # The routing provider is NOT probed here. A readiness probe runs every few
     # seconds; calling a billed API that often would be expensive and would

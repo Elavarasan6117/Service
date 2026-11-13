@@ -26,11 +26,11 @@ Each has its own `.env`, its own database, and its own Google Maps API key with 
 
 1. Create a dedicated project for production. Do not reuse the development project — a shared quota means a development loop can exhaust production's.
 2. Enable exactly four APIs: **Geocoding API**, **Places API**, **Distance Matrix API**, **Directions API**.
-3. Create two API keys. Restrict the server key by IP and limit it to Geocoding, Places, Distance Matrix, and Directions APIs. Restrict the browser key by the deployed site's HTTP referrer and limit it to Maps JavaScript API. The browser key is visible in the downloaded JavaScript by design; referrer and API restrictions are required.
+3. Create two API keys. Restrict the server key to the server-side APIs used by the configured providers (Geocoding, Places, and routing APIs). Use an IP restriction only if the host has stable outbound IPs. Restrict the browser key by HTTP referrer and limit it to Maps JavaScript API. For the current Render frontend, allow `https://chennai-svc-frontend.onrender.com/*`; add the exact production custom domain separately if one is configured. The browser key is visible in the downloaded JavaScript by design, so keep both restrictions enabled.
 4. Set a **daily quota cap** on each API. This is the only hard stop against a runaway loop turning into an invoice.
 5. Set a billing budget alert at your expected monthly spend.
 
-The key is a server credential. It goes in `.env` on the host, is never committed, and never reaches a browser.
+The server key is a credential: keep it in the backend environment, never commit it, and never place it in frontend variables. The separate browser key is necessarily public in the frontend bundle and must remain restricted as described above.
 
 ### 1.3 Configuration
 

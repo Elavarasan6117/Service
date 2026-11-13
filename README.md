@@ -70,7 +70,7 @@ Interactive API docs are at `/api/v1/docs` in non-production environments.
 | Database | PostgreSQL 16 + PostGIS 3.4 (GiST spatial indexes, KNN candidate search) |
 | Backend | Python 3.11, FastAPI, SQLAlchemy 2.0 async, Alembic |
 | Cache / pub-sub | Redis 7 |
-| Frontend | React 18, TypeScript, Vite, Leaflet + OpenStreetMap tiles |
+| Frontend | React 18, TypeScript, Vite, Google Maps JavaScript API |
 | Routing / geocoding | Google Maps Platform (swappable — OSRM adapter included) |
 | Real-time | Server-Sent Events over Redis pub/sub |
 | Monitoring | Prometheus + Grafana, structured JSON logs |
@@ -119,7 +119,7 @@ backend/
   tests/          57 tests including all 10 acceptance scenarios
   scripts/        entrypoint, seed, backup
 frontend/
-  src/            React + TypeScript SPA, Leaflet map
+  src/            React + TypeScript SPA, Google Maps operations map
 deploy/
   nginx/          edge proxy, CSP, SSE-aware config
   prometheus/     scrape config and alert rules

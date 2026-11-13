@@ -29,16 +29,25 @@ function loadGoogleMaps(): Promise<void> {
   googleMapsPromise = new Promise((resolve, reject) => {
     const callbackName = '__serviceabilityGoogleMapsReady'
     const callbackHost = window as unknown as Record<string, () => void>
+    const script = document.createElement('script')
+    const timeout = window.setTimeout(() => {
+      delete callbackHost[callbackName]
+      script.remove()
+      googleMapsPromise = null
+      reject(new Error('Google Maps took too long to load. Check the browser key, Maps JavaScript API access, and network connection.'))
+    }, 15000)
     callbackHost[callbackName] = () => {
+      window.clearTimeout(timeout)
       delete callbackHost[callbackName]
       resolve()
     }
-    const script = document.createElement('script')
     script.src = `https://maps.googleapis.com/maps/api/js?key=${encodeURIComponent(apiKey)}&callback=${callbackName}&loading=async`
     script.async = true
     script.defer = true
     script.onerror = () => {
+      window.clearTimeout(timeout)
       delete callbackHost[callbackName]
+      script.remove()
       googleMapsPromise = null
       reject(new Error('Google Maps could not load. Check that this key has Maps JavaScript API enabled and is allowed for this site.'))
     }
@@ -81,6 +90,13 @@ export function OperationsMap({
 }: Props) {
   const containerRef = useRef<HTMLDivElement | null>(null)
   const mapRef = useRef<google.maps.Map | null>(null)
+  const initialMapViewRef = useRef({
+    center: { lat: data?.center.latitude ?? 13.0827, lng: data?.center.longitude ?? 80.2707 },
+    zoom: data?.zoom ?? 12,
+  })
+  const mapListenerRef = useRef<google.maps.MapsEventListener | null>(null)
+  const resizeObserverRef = useRef<ResizeObserver | null>(null)
+  const initializationRef = useRef(false)
   const staticMarkersRef = useRef<MarkerEntry[]>([])
   const draftMarkerRef = useRef<google.maps.Marker | null>(null)
   const editorMarkersRef = useRef<Map<string, google.maps.Marker>>(new Map())
@@ -108,10 +124,17 @@ export function OperationsMap({
     }
     window.gm_authFailure = handleGoogleMapsAuthFailure
     void loadGoogleMaps().then(() => {
-      if (cancelled || !containerRef.current) return
-      const map = new window.google!.maps.Map(containerRef.current, {
-        center: { lat: data?.center.latitude ?? 13.0827, lng: data?.center.longitude ?? 80.2707 },
-        zoom: data?.zoom ?? 12,
+      const container = containerRef.current
+      if (cancelled) return
+      if (!(container instanceof HTMLElement) || !container.isConnected) {
+        throw new Error('The map container is not available. Reopen the page and try again.')
+      }
+      if (initializationRef.current || mapRef.current) return
+      initializationRef.current = true
+      const initialView = initialMapViewRef.current
+      const map = new window.google!.maps.Map(container, {
+        center: initialView.center,
+        zoom: initialView.zoom,
         fullscreenControl: true,
         mapTypeControl: false,
         streetViewControl: false,
@@ -119,19 +142,33 @@ export function OperationsMap({
       })
       mapRef.current = map
       setMapReady(true)
-      map.addListener('click', (event) => {
+      mapListenerRef.current = map.addListener('click', (event) => {
         if (!event.latLng) return
         onMapClickRef.current?.(
           Number(event.latLng.lat().toFixed(6)),
           Number(event.latLng.lng().toFixed(6)),
         )
       })
+      if (typeof ResizeObserver !== 'undefined') {
+        const observer = new ResizeObserver((entries) => {
+          if (!entries.some((entry) => entry.target === container) || !container.isConnected) return
+          window.google?.maps.event.trigger(map, 'resize')
+        })
+        resizeObserverRef.current = observer
+        observer.observe(container)
+      }
     }).catch((error: unknown) => {
+      initializationRef.current = false
       if (!cancelled) setMapError(error instanceof Error ? error.message : 'Google Maps could not load.')
     })
 
+    const editorMarkers = editorMarkersRef.current
     return () => {
       cancelled = true
+      resizeObserverRef.current?.disconnect()
+      resizeObserverRef.current = null
+      mapListenerRef.current?.remove()
+      mapListenerRef.current = null
       if (window.gm_authFailure === handleGoogleMapsAuthFailure) {
         delete window.gm_authFailure
       }
@@ -139,13 +176,14 @@ export function OperationsMap({
       for (const entry of focusMarkersRef.current) entry.marker.setMap(null)
       for (const line of focusLinesRef.current) line.setMap(null)
       draftMarkerRef.current?.setMap(null)
-      for (const marker of editorMarkersRef.current.values()) marker.setMap(null)
+      for (const marker of editorMarkers.values()) marker.setMap(null)
       staticMarkersRef.current = []
       focusMarkersRef.current = []
       focusLinesRef.current = []
       draftMarkerRef.current = null
-      editorMarkersRef.current.clear()
+      editorMarkers.clear()
       mapRef.current = null
+      initializationRef.current = false
     }
   }, [])
 

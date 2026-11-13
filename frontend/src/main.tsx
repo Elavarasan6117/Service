@@ -2,8 +2,8 @@ import React from 'react'
 import ReactDOM from 'react-dom/client'
 import { BrowserRouter } from 'react-router-dom'
 
-// Bundled from node_modules, not a CDN — the page has no third-party runtime
-// dependency and works on a network that cannot reach the public internet.
+// Application styles are bundled locally. The operations map loads Google
+// Maps on demand in OperationsMap.tsx.
 import './styles/app.css'
 
 import App from './App'

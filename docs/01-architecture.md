@@ -32,7 +32,7 @@ These are assumptions, not facts. Each one is called out because a wrong assumpt
 | ORM / migrations | SQLAlchemy 2.0 + GeoAlchemy2 + Alembic | Versioned, reversible migrations are a rollback requirement. |
 | Cache / rate limit | **Redis 7** | Route-result cache (§19 cost control), token-bucket rate limiter, and SSE fan-out across multiple API workers. |
 | Frontend | **React 18 + TypeScript + Vite** | Type safety against the generated API schema; fast dev loop. |
-| Map | **Leaflet + OpenStreetMap tiles** | Deliberate: it means **no Google key is ever shipped to the browser**. Every Google call (geocode, autocomplete, distance matrix, directions) is proxied by the backend. Route geometry comes back as a decoded polyline and is drawn as a Leaflet layer. This directly satisfies "Do not expose routing API keys in frontend code". |
+| Map | **Google Maps JavaScript API** | The map uses a separate browser key restricted by HTTP referrer and API. Geocoding, Places, routing, and directions calls use the server-side key through backend provider adapters. Route geometry comes back as a decoded polyline and is drawn as a map layer. |
 | Real-time | **Server-Sent Events over Redis pub/sub** | The dashboard is read-mostly and one-directional. SSE is simpler than WebSocket, survives proxies, and auto-reconnects. Multiple operations users each hold one SSE stream; events fan out through Redis so any API replica can publish. |
 | Tests | pytest + pytest-asyncio + httpx | The 10 acceptance scenarios in §25 of the brief run against a fake routing provider so they are deterministic and cost nothing. |
 | Metrics | prometheus-client | Scrape endpoint at `/metrics`; alert rules shipped in `deploy/prometheus/`. |
@@ -47,7 +47,7 @@ These are assumptions, not facts. Each one is called out because a wrong assumpt
 flowchart TB
     subgraph Browser["Operations Browser"]
         UI["React + TypeScript SPA"]
-        MAP["Leaflet map — OSM tiles"]
+        MAP["Google Maps JavaScript API"]
         SSE_C["EventSource client"]
         UI --- MAP
         UI --- SSE_C
@@ -112,7 +112,7 @@ flowchart TB
     Domain --> PG
     API --> PROM
     API --> LOGS
-    MAP -->|tiles| OSMT(["OpenStreetMap tiles"])
+    MAP -->|map tiles| GOOGLE
 ```
 
 **The key security property visible in this diagram:** the browser talks only to Nginx. There is no arrow from `Browser` to `Google Maps Platform`. Map tiles come from OSM, which needs no key.

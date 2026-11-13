@@ -38,6 +38,10 @@ declare global {
       fitBounds(bounds: LatLngBounds, padding?: number): void
     }
 
+    const event: {
+      trigger(instance: Map, eventName: string): void
+    }
+
     interface MarkerIcon {
       url: string
       scaledSize: Size

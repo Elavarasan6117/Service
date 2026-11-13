@@ -239,7 +239,7 @@ export const api = {
       body: JSON.stringify({ latitude, longitude, reason }),
     }),
 
-  // --- Geocoding (proxied — no Google key in this browser) --------------
+  // --- Geocoding (proxied through the backend; server key stays private) --
 
   autocomplete: (q: string, sessionToken: string) =>
     request<AddressSuggestion[]>(
