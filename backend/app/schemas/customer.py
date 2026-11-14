@@ -26,6 +26,15 @@ class CustomerCreate(CamelModel):
     latitude: float | None = Field(None, ge=-90, le=90)
     longitude: float | None = Field(None, ge=-180, le=180)
 
+    @field_validator("customer_name", mode="before")
+    @classmethod
+    def _customer_name_not_blank(cls, value: str) -> str:
+        if isinstance(value, str):
+            value = value.strip()
+            if not value:
+                raise ValueError("Customer name cannot be blank or only whitespace.")
+        return value
+
     @field_validator("customer_code")
     @classmethod
     def _code_charset(cls, v: str | None) -> str | None:

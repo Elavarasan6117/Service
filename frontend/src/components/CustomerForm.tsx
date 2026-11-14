@@ -72,6 +72,7 @@ export function CustomerForm({
   const [geocoding, setGeocoding] = useState(false)
   const [submitting, setSubmitting] = useState(false)
   const [error, setError] = useState<ApiError | Error | null>(null)
+  const [customerNameError, setCustomerNameError] = useState<string | null>(null)
   const [notice, setNotice] = useState<string | null>(null)
 
   // One Places session token per address search groups the keystrokes into a
@@ -115,6 +116,7 @@ export function CustomerForm({
     event: React.ChangeEvent<HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement>,
   ) => {
     setForm((previous) => ({ ...previous, [field]: event.target.value }))
+    if (field === 'customerName') setCustomerNameError(null)
   }
 
   const onAddressChange = (event: React.ChangeEvent<HTMLTextAreaElement>) => {
@@ -271,6 +273,13 @@ export function CustomerForm({
 
   const submit = async (event: React.FormEvent) => {
     event.preventDefault()
+    const customerName = form.customerName.trim()
+    if (!customerName) {
+      setCustomerNameError('Enter a customer name. It cannot be blank or only spaces.')
+      document.getElementById('customerName')?.focus()
+      return
+    }
+    setCustomerNameError(null)
     setSubmitting(true)
     setError(null)
     setNotice(null)
@@ -313,7 +322,7 @@ export function CustomerForm({
       }
 
       const payload: Record<string, unknown> = {
-        customerName: form.customerName.trim(),
+        customerName,
         address: form.address.trim(),
         city: form.city.trim(),
       }
@@ -404,11 +413,18 @@ export function CustomerForm({
         <input
           id="customerName"
           required
+          aria-invalid={Boolean(customerNameError)}
+          aria-describedby={customerNameError ? 'customerName-error' : undefined}
           value={form.customerName}
           onChange={update('customerName')}
           placeholder="ABC Foods"
           disabled={busy}
         />
+        {customerNameError && (
+          <div id="customerName-error" className="field__error" role="alert">
+            {customerNameError}
+          </div>
+        )}
       </div>
 
       <div className="field">

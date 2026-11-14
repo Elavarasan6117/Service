@@ -224,6 +224,55 @@ async def test_create_customer_runs_check_and_returns_canonical_shape(
         result["nearestServiceLocation"]["distanceMeters"] / 1000, abs=0.001
     )
     assert result["checkId"]
+    map_response = await client.get(
+        "/api/v1/map/operations", headers=auth_headers(ops_user)
+    )
+    assert map_response.status_code == 200
+    assert any(
+        item["id"] == body["customer"]["id"]
+        for item in map_response.json()["customers"]
+    )
+
+
+async def test_create_customer_with_manual_address_saves_trimmed_name(
+    client, ops_user
+):
+    response = await client.post(
+        "/api/v1/customers",
+        headers=auth_headers(ops_user),
+        json={
+            "customerName": "  Manual Address Customer  ",
+            "address": "45 Second Avenue, Anna Nagar, Chennai",
+        },
+    )
+    assert response.status_code == 201, response.text
+    assert response.json()["customer"]["customerName"] == "Manual Address Customer"
+    listed = await client.get(
+        "/api/v1/customers", headers=auth_headers(ops_user), params={"q": "Manual Address Customer"}
+    )
+    assert listed.status_code == 200
+    assert any(
+        item["id"] == response.json()["customer"]["id"]
+        for item in listed.json()["items"]
+    )
+
+
+@pytest.mark.parametrize("customer_name", ["", "   \t\n"])
+async def test_create_customer_rejects_blank_or_whitespace_name(
+    client, ops_user, customer_name
+):
+    response = await client.post(
+        "/api/v1/customers",
+        headers=auth_headers(ops_user),
+        json={"customerName": customer_name, "address": "45 Test Road, Chennai"},
+    )
+    assert response.status_code == 422
+    details = response.json()["error"]["details"]
+    assert any(
+        detail.get("field") == "customerName"
+        and "cannot be blank" in detail.get("message", "").lower()
+        for detail in details
+    )
 
 
 async def test_admin_delete_removes_customer_but_preserves_audit_check(client, admin_user, a_location):
