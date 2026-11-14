@@ -8,7 +8,6 @@ interface Props {
   data: MapOperations | null
   result: ServiceabilityResult | null
   routePreview?: RoutePreviewResult | null
-  selectedRouteId?: string | null
   /** The point currently being assessed, which the operator can drag. */
   draftPoint: { latitude: number; longitude: number } | null
   draggable: boolean
@@ -85,7 +84,6 @@ export function OperationsMap({
   data,
   result,
   routePreview = null,
-  selectedRouteId = null,
   draftPoint,
   draggable,
   onDragEnd,
@@ -263,7 +261,7 @@ export function OperationsMap({
         title: 'New customer — drag to correct, then Confirm',
         draggable,
         zIndex: 1000,
-        icon: markerIcon('#d92d20', 11),
+        icon: markerIcon('#E11D48', 11),
       })
       marker.addListener('dragend', () => {
         const point = marker.getPosition()
@@ -330,29 +328,51 @@ export function OperationsMap({
     focusMarkersRef.current = []
     focusLinesRef.current = []
     if (routePreview && draftPoint) {
-      const visiblePoints: google.maps.LatLngLiteral[] = []
-      for (const route of routePreview.routes) {
-        if (!route.geometry || route.geometryFormat !== 'encoded_polyline_5') continue
+      const bounds = new window.google!.maps.LatLngBounds()
+      const destination = { lat: draftPoint.latitude, lng: draftPoint.longitude }
+      bounds.extend(destination)
+      const routeByKind = {
+        WAREHOUSE: routePreview.routes.find((route) => route.origin.kind === 'WAREHOUSE'),
+        CUSTOMER: routePreview.routes.find((route) => route.origin.kind === 'CUSTOMER'),
+      }
+      const origins = [
+        { kind: 'WAREHOUSE' as const, origin: routePreview.nearestWarehouse, route: routeByKind.WAREHOUSE, color: '#2563EB', label: 'W' },
+        { kind: 'CUSTOMER' as const, origin: routePreview.nearestCustomer, route: routeByKind.CUSTOMER, color: '#E11D48', label: 'C' },
+      ]
+      for (const item of origins) {
+        if (!item.origin) continue
+        const position = { lat: item.origin.latitude, lng: item.origin.longitude }
+        bounds.extend(position)
+        const marker = new window.google!.maps.Marker({
+          map,
+          position,
+          title: `${item.kind === 'WAREHOUSE' ? 'Warehouse' : 'Existing customer'} start: ${item.origin.name}`,
+          zIndex: 950,
+          icon: markerIcon(item.color, 10),
+          label: { text: item.label, color: '#ffffff', fontWeight: '700', fontSize: '10px' },
+        })
+        const info = new window.google!.maps.InfoWindow({ content: `<strong>${escapeHtml(item.origin.name)}</strong><br/>${item.kind === 'WAREHOUSE' ? 'Warehouse' : 'Existing customer'} route start` })
+        marker.addListener('click', () => info.open({ map, anchor: marker }))
+        focusMarkersRef.current.push({ marker, info })
+      }
+      for (const route of Object.values(routeByKind)) {
+        if (!route?.geometry || route.geometryFormat !== 'encoded_polyline_5') continue
         const points = decodePolyline(route.geometry)
         if (points.length < 2) continue
-        const selected = route.id === selectedRouteId
         const path = points.map(([lat, lng]) => ({ lat, lng }))
+        const color = route.origin.kind === 'WAREHOUSE' ? '#2563EB' : '#E11D48'
         const line = new window.google!.maps.Polyline({
           map,
           path,
-          strokeColor: selected ? '#0f7b3d' : route.origin.kind === 'WAREHOUSE' ? '#7651a9' : '#3182ce',
-          strokeWeight: selected ? 6 : 3,
-          strokeOpacity: selected ? 0.92 : 0.48,
+          strokeColor: color,
+          strokeWeight: 6,
+          strokeOpacity: 0.92,
           clickable: false,
         })
         focusLinesRef.current.push(line)
-        if (selected) visiblePoints.push(...path)
+        for (const point of path) bounds.extend(point)
       }
-      if (visiblePoints.length > 1) {
-        const bounds = new window.google!.maps.LatLngBounds()
-        for (const point of visiblePoints) bounds.extend(point)
-        map.fitBounds(bounds, 48)
-      }
+      map.fitBounds(bounds, 48)
       return
     }
     if (!result?.nearestServiceLocation || !draftPoint) return
@@ -411,7 +431,7 @@ export function OperationsMap({
       })
       focusLinesRef.current.push(line)
     }
-  }, [result, draftPoint, routePreview, selectedRouteId, mapReady])
+  }, [result, draftPoint, routePreview, mapReady])
 
   const serviceLocations = data?.serviceLocations.filter(
     (location) => location.latitude != null && location.longitude != null,
@@ -448,10 +468,12 @@ export function OperationsMap({
         <div className="map-legend__title">Legend</div>
         <div className="map-legend__row"><span className="map-legend__swatch map-legend__swatch--square" style={{ background: '#4b2e83' }} />Warehouse</div>
         <div className="map-legend__row"><span className="map-legend__swatch" style={{ background: '#1a5fa8' }} />Existing service location</div>
-        <div className="map-legend__row"><span className="map-legend__swatch" style={{ background: '#d92d20' }} />New customer</div>
+        <div className="map-legend__row"><span className="map-legend__swatch" style={{ background: '#E11D48' }} />New customer</div>
         <div className="map-legend__row"><span className="map-legend__swatch" style={{ background: '#0f7b3d' }} />Available / nearest</div>
         <div className="map-legend__row"><span className="map-legend__swatch" style={{ background: '#b4232b' }} />Not available</div>
         <div className="map-legend__row"><span className="map-legend__swatch" style={{ background: '#9a5b06' }} />Needs verification</div>
+        <div className="map-legend__row"><span className="route-preview__swatch route-preview__swatch--warehouse" />Warehouse → new customer route</div>
+        <div className="map-legend__row"><span className="route-preview__swatch route-preview__swatch--customer" />Existing customer → new customer route</div>
       </div>
     </div>
   )

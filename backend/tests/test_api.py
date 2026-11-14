@@ -64,6 +64,8 @@ async def test_route_preview_uses_active_warehouse_and_returns_road_route(
     assert body["routes"]
     assert body["routes"][0]["distanceMeters"] > 0
     assert body["routes"][0]["availability"] == "CALCULATED_UNVERIFIED"
+    assert body["warehouseRouteStatus"] == "CALCULATED_UNVERIFIED"
+    assert body["customerRouteStatus"] == "NO_NEARBY_LOCATION"
 
 
 async def test_login_succeeds_and_returns_tokens(client, ops_user):

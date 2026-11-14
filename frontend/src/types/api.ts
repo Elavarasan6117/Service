@@ -191,7 +191,7 @@ export interface MapOperations {
 
 export interface RoutePreview {
   id: string
-  origin: { id: string; name: string; kind: 'WAREHOUSE' | 'CUSTOMER'; latitude: number; longitude: number; distanceMeters: number }
+  origin: { id: string; name: string; kind: 'WAREHOUSE' | 'CUSTOMER'; latitude: number; longitude: number; distanceMeters: number; address: string | null }
   distanceMeters: number
   durationSeconds: number | null
   geometry: string | null
@@ -206,6 +206,10 @@ export interface RoutePreviewResult {
   nearestWarehouse: RoutePreview['origin'] | null
   nearestCustomer: RoutePreview['origin'] | null
   routes: RoutePreview[]
+  warehouseRouteStatus: string
+  customerRouteStatus: string
+  warehouseRouteMessage: string | null
+  customerRouteMessage: string | null
   message: string | null
 }
 

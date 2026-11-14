@@ -269,6 +269,7 @@ class PreviewOrigin(CamelModel):
     latitude: float
     longitude: float
     distance_meters: int
+    address: str | None = None
 
 
 class PreviewRoute(CamelModel):
@@ -288,6 +289,10 @@ class RoutePreviewResponse(CamelModel):
     nearest_warehouse: PreviewOrigin | None
     nearest_customer: PreviewOrigin | None
     routes: list[PreviewRoute]
+    warehouse_route_status: str
+    customer_route_status: str
+    warehouse_route_message: str | None = None
+    customer_route_message: str | None = None
     message: str | None = None
 
 

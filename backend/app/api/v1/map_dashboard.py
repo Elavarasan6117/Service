@@ -71,14 +71,14 @@ async def preview_vehicle_routes(
         lat, lng = float(item.latitude), float(item.longitude)
         air = distance_km(lat, lng)
         if air <= payload.search_radius_km:
-            candidates.append((PreviewOrigin(id=item.id, name=item.warehouse_name, kind="WAREHOUSE", latitude=lat, longitude=lng, distance_meters=0), Coordinate(lat, lng), air))
+            candidates.append((PreviewOrigin(id=item.id, name=item.warehouse_name, kind="WAREHOUSE", latitude=lat, longitude=lng, distance_meters=0, address=item.address), Coordinate(lat, lng), air))
     for item in customers:
         if item.latitude is None or item.longitude is None:
             continue
         lat, lng = float(item.latitude), float(item.longitude)
         air = distance_km(lat, lng)
         if air <= payload.search_radius_km:
-            candidates.append((PreviewOrigin(id=item.id, name=item.customer_name, kind="CUSTOMER", latitude=lat, longitude=lng, distance_meters=0), Coordinate(lat, lng), air))
+            candidates.append((PreviewOrigin(id=item.id, name=item.customer_name, kind="CUSTOMER", latitude=lat, longitude=lng, distance_meters=0, address=item.address), Coordinate(lat, lng), air))
 
     # Keep a broad geographic shortlist for each origin type. Road distances,
     # never straight-line distance, determine the displayed ranking. Keeping
@@ -94,6 +94,11 @@ async def preview_vehicle_routes(
     road_ranked: list[tuple[PreviewOrigin, Coordinate, int]] = []
     provider = get_route_preview_provider()
     provider_message = None
+    route_status = {"WAREHOUSE": "NO_NEARBY_LOCATION", "CUSTOMER": "NO_NEARBY_LOCATION"}
+    route_message: dict[str, str | None] = {"WAREHOUSE": None, "CUSTOMER": None}
+    for kind in ("WAREHOUSE", "CUSTOMER"):
+        if any(row[0].kind == kind for row in candidates):
+            route_status[kind] = "NO_DRIVING_ROUTE"
     if candidates:
         try:
             legs = await provider.get_driving_distances(
@@ -102,6 +107,10 @@ async def preview_vehicle_routes(
         except ProviderError:
             legs = []
             provider_message = "Route service is temporarily unavailable. Please try again."
+            for kind in ("WAREHOUSE", "CUSTOMER"):
+                if any(row[0].kind == kind for row in candidates):
+                    route_status[kind] = "ROUTE_UNAVAILABLE"
+                    route_message[kind] = provider_message
         for (origin, coordinate, _), leg in zip(candidates, legs):
             if leg is not None:
                 road_ranked.append((origin.model_copy(update={"distance_meters": leg.distance_meters}), coordinate, leg.distance_meters))
@@ -116,8 +125,19 @@ async def preview_vehicle_routes(
     for origin, coordinate, _ in selected:
         try:
             alternatives = await provider.get_driving_routes(coordinate, destination)
-        except ProviderError:
+        except ProviderError as exc:
+            if exc.code == "PROVIDER_NO_ROUTE":
+                route_status[origin.kind] = "NO_DRIVING_ROUTE"
+                route_message[origin.kind] = "No four-wheeler driving route is available."
+            else:
+                route_status[origin.kind] = "ROUTE_UNAVAILABLE"
+                route_message[origin.kind] = "Driving route could not be calculated."
             continue
+        if not alternatives:
+            route_status[origin.kind] = "NO_DRIVING_ROUTE"
+            route_message[origin.kind] = "No four-wheeler driving route is available."
+            continue
+        route_status[origin.kind] = "CALCULATED_UNVERIFIED"
         for index, route in enumerate(alternatives):
             routes.append(PreviewRoute(
                 id=f"{origin.kind.lower()}-{origin.id}-{index}", origin=origin,
@@ -131,6 +151,10 @@ async def preview_vehicle_routes(
         nearest_warehouse=next((row[0] for row in selected if row[0].kind == "WAREHOUSE"), None),
         nearest_customer=next((row[0] for row in selected if row[0].kind == "CUSTOMER"), None),
         routes=routes,
+        warehouse_route_status=route_status["WAREHOUSE"],
+        customer_route_status=route_status["CUSTOMER"],
+        warehouse_route_message=route_message["WAREHOUSE"],
+        customer_route_message=route_message["CUSTOMER"],
         message=provider_message or ("No nearby road-accessible locations found." if not routes else None),
     )
 

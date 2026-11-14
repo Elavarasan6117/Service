@@ -18,34 +18,6 @@ import type {
   RoutePreviewResult,
 } from '../types/api'
 
-function straightLineMeters(
-  from: { latitude: number; longitude: number },
-  to: { latitude: number; longitude: number },
-) {
-  const radians = (degrees: number) => (degrees * Math.PI) / 180
-  const latitudeDelta = radians(to.latitude - from.latitude)
-  const longitudeDelta = radians(to.longitude - from.longitude)
-  const a =
-    Math.sin(latitudeDelta / 2) ** 2 +
-    Math.cos(radians(from.latitude)) *
-      Math.cos(radians(to.latitude)) *
-      Math.sin(longitudeDelta / 2) ** 2
-  return 6_371_000 * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a))
-}
-
-function drivingDirectionsUrl(
-  origin: { latitude: number; longitude: number },
-  destination: { latitude: number; longitude: number },
-) {
-  const params = new URLSearchParams({
-    api: '1',
-    origin: `${origin.latitude},${origin.longitude}`,
-    destination: `${destination.latitude},${destination.longitude}`,
-    travelmode: 'driving',
-  })
-  return `https://www.google.com/maps/dir/?${params.toString()}`
-}
-
 interface Props {
   canCreate: boolean
   canAdjustLocation: boolean
@@ -103,20 +75,22 @@ export function DashboardPage({
   } | null>(null)
   const [routePreview, setRoutePreview] = useState<RoutePreviewResult | null>(null)
   const [routeLoading, setRouteLoading] = useState(false)
-  const [selectedRouteId, setSelectedRouteId] = useState<string | null>(null)
   const [searchRadiusKm, setSearchRadiusKm] = useState(25)
+  const [routeFailure, setRouteFailure] = useState<string | null>(null)
   const routeRequestId = useRef(0)
 
   useEffect(() => {
     const requestId = ++routeRequestId.current
     if (!draftPoint) {
       setRoutePreview(null)
-      setSelectedRouteId(null)
+      setRouteFailure(null)
       setRouteLoading(false)
       return
     }
+    setRoutePreview(null)
+    setRouteFailure(null)
+    setRouteLoading(true)
     const timer = window.setTimeout(async () => {
-      setRouteLoading(true)
       try {
         const response = await api.previewRoutes(
           draftPoint.latitude,
@@ -126,9 +100,11 @@ export function DashboardPage({
         )
         if (routeRequestId.current !== requestId) return
         setRoutePreview(response)
-        setSelectedRouteId(response.routes[0]?.id ?? null)
       } catch {
-        if (routeRequestId.current === requestId) setRoutePreview(null)
+        if (routeRequestId.current === requestId) {
+          setRoutePreview(null)
+          setRouteFailure('Unable to calculate nearby driving routes. Please try again.')
+        }
       } finally {
         if (routeRequestId.current === requestId) setRouteLoading(false)
       }
@@ -261,6 +237,7 @@ export function DashboardPage({
   const handleMapLocation = useCallback(
     (latitude: number, longitude: number, selectingNewCustomer = false) => {
       setDraftPoint({ latitude, longitude })
+      setResult(null)
       if (activeCustomer && !selectingNewCustomer) {
         setPendingMove(true)
         return
@@ -293,34 +270,6 @@ export function DashboardPage({
   // Preview checks (no linked customer) are permanent audit history, but not
   // relevant to show alongside live customer activity on this dashboard.
   const linkedChecks = checks.filter((check) => check.customerId)
-  const newCustomerPoint =
-    activeCustomer?.latitude != null && activeCustomer.longitude != null
-      ? { latitude: activeCustomer.latitude, longitude: activeCustomer.longitude }
-      : null
-  const nearestExistingCustomer = newCustomerPoint
-    ? (mapData?.customers ?? [])
-        .filter(
-          (customer) =>
-            customer.id !== activeCustomer?.id &&
-            customer.latitude != null &&
-            customer.longitude != null,
-        )
-        .sort(
-          (a, b) =>
-            straightLineMeters(newCustomerPoint, a) -
-            straightLineMeters(newCustomerPoint, b),
-        )[0]
-    : undefined
-  const nearestWarehouse = newCustomerPoint
-    ? (mapData?.warehouses ?? [])
-        .filter((warehouse) => warehouse.status === 'ACTIVE')
-        .sort(
-          (a, b) =>
-            straightLineMeters(newCustomerPoint, a) -
-            straightLineMeters(newCustomerPoint, b),
-        )[0]
-    : undefined
-
   return (
     <div className="layout">
       {/* ---------------- Left column ---------------- */}
@@ -374,30 +323,6 @@ export function DashboardPage({
               loading={checking}
               onRetry={retryCheck}
             />
-            {newCustomerPoint && (nearestExistingCustomer || nearestWarehouse) && (
-              <div className="row" style={{ marginTop: 12, gap: 12, flexWrap: 'wrap' }}>
-                {nearestExistingCustomer && (
-                  <a
-                    className="btn btn--secondary btn--sm"
-                    href={drivingDirectionsUrl(nearestExistingCustomer, newCustomerPoint)}
-                    target="_blank"
-                    rel="noreferrer"
-                  >
-                    Driving directions: {nearestExistingCustomer.customerName} to new customer
-                  </a>
-                )}
-                {nearestWarehouse && (
-                  <a
-                    className="btn btn--secondary btn--sm"
-                    href={drivingDirectionsUrl(nearestWarehouse, newCustomerPoint)}
-                    target="_blank"
-                    rel="noreferrer"
-                  >
-                    Driving directions: {nearestWarehouse.warehouseName} to new customer
-                  </a>
-                )}
-              </div>
-            )}
             {pendingMove && activeCustomer && canAdjustLocation && (
               <div className="row" style={{ marginTop: 13 }}>
                 <button
@@ -472,7 +397,6 @@ export function DashboardPage({
               result={result}
               draftPoint={draftPoint}
               routePreview={routePreview}
-              selectedRouteId={selectedRouteId}
               draggable={canAdjustLocation}
               onDragEnd={(latitude, longitude) => {
                 handleMapLocation(latitude, longitude)
@@ -500,8 +424,7 @@ export function DashboardPage({
             <RoutePreviewPanel
               result={routePreview}
               loading={routeLoading}
-              selectedId={selectedRouteId}
-              onSelect={setSelectedRouteId}
+              error={routeFailure}
               searchRadiusKm={searchRadiusKm}
               onSearchRadiusChange={setSearchRadiusKm}
             />
