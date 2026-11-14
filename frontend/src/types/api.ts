@@ -197,7 +197,7 @@ export interface RoutePreview {
   geometry: string | null
   geometryFormat: string
   provider: string
-  availability: 'CALCULATED_UNVERIFIED'
+  availability: 'CALCULATED_UNVERIFIED' | 'ROUTE_GEOMETRY_UNAVAILABLE'
 }
 
 export interface RoutePreviewResult {

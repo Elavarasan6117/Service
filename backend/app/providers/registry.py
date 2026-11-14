@@ -91,10 +91,19 @@ def get_routing_provider() -> ResilientRoutingProvider:
 
 
 def get_route_preview_provider() -> ResilientRoutingProvider:
-    """Provider for display-only route previews; defaults to routing config."""
+    """Use a real road router for previews when the demo router is configured."""
     global _route_preview
-    key = settings.ROUTE_PREVIEW_PROVIDER.strip().lower()
-    if not key or key == settings.ROUTING_PROVIDER.strip().lower():
+    configured = settings.ROUTE_PREVIEW_PROVIDER.strip().lower()
+    routing_key = settings.ROUTING_PROVIDER.strip().lower()
+    # The hosted demo intentionally keeps synthetic serviceability results.
+    # Route previews must still use actual road geometry when the server key is
+    # available, even if Render has not synced the optional preview setting yet.
+    key = configured or (
+        "google_maps"
+        if routing_key == "fake" and settings.GOOGLE_MAPS_API_KEY
+        else routing_key
+    )
+    if key == routing_key:
         return get_routing_provider()
     if _route_preview is None:
         factory = _ROUTING_FACTORIES.get(key)

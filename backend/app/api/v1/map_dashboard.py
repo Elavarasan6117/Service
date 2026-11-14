@@ -144,6 +144,11 @@ async def preview_vehicle_routes(
                 distance_meters=route.distance_meters,
                 duration_seconds=route.duration_seconds, geometry=route.geometry,
                 geometry_format=route.geometry_format, provider=route.provider,
+                availability=(
+                    "CALCULATED_UNVERIFIED"
+                    if route.geometry and route.geometry_format == "encoded_polyline_5"
+                    else "ROUTE_GEOMETRY_UNAVAILABLE"
+                ),
             ))
     routes.sort(key=lambda route: route.distance_meters)
     return RoutePreviewResponse(

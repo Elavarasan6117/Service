@@ -1,4 +1,5 @@
 import type { RoutePreview, RoutePreviewResult } from '../types/api'
+import { decodePolyline } from '../lib/polyline'
 
 interface Props {
   result: RoutePreviewResult | null
@@ -10,6 +11,7 @@ interface Props {
 
 const statusText: Record<string, string> = {
   CALCULATED_UNVERIFIED: 'Calculated · four-wheeler access unverified',
+  ROUTE_GEOMETRY_UNAVAILABLE: 'Road distance calculated, but route geometry is unavailable to draw',
   NO_NEARBY_LOCATION: 'No nearby active location found',
   NO_DRIVING_ROUTE: 'No driving route is available',
   ROUTE_UNAVAILABLE: 'Route service is temporarily unavailable',
@@ -74,6 +76,9 @@ function RouteCard({
   color: 'warehouse' | 'customer'
 }) {
   const origin = route?.origin ?? (color === 'warehouse' ? destination.nearestWarehouse : destination.nearestCustomer)
+  const displayStatus = route && (!route.geometry || route.geometryFormat !== 'encoded_polyline_5' || decodePolyline(route.geometry).length < 2)
+    ? 'ROUTE_GEOMETRY_UNAVAILABLE'
+    : route?.availability ?? status
   return (
     <article className={`route-preview__route route-preview__route--${color}`}>
       <h4>{title}</h4>
@@ -87,7 +92,7 @@ function RouteCard({
         <dt>Estimated driving time</dt>
         <dd>{route?.durationSeconds != null ? `${Math.max(1, Math.round(route.durationSeconds / 60))} min` : '—'}</dd>
       </dl>
-      <p className="route-preview__status">{message ?? statusText[status] ?? status}</p>
+      <p className="route-preview__status">{message ?? statusText[displayStatus] ?? statusText[status] ?? status}</p>
     </article>
   )
 }

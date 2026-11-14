@@ -124,8 +124,10 @@ class FakeRoutingProvider:
         return RouteDetail(
             distance_meters=meters,
             duration_seconds=max(60, int(meters / 8.33)),
-            geometry="fake_polyline",
-            geometry_format="encoded_polyline_5",
+            # Synthetic distances have no corresponding road geometry. Never
+            # feed placeholder text into the map's real-polyline renderer.
+            geometry=None,
+            geometry_format="none",
             provider=self.name,
         )
 
