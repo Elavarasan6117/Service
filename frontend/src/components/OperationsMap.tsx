@@ -355,22 +355,49 @@ export function OperationsMap({
         marker.addListener('click', () => info.open({ map, anchor: marker }))
         focusMarkersRef.current.push({ marker, info })
       }
+      const drawRoutes: {
+        path: google.maps.LatLngLiteral[]
+        color: string
+        weight: number
+      }[] = []
       for (const route of Object.values(routeByKind)) {
         if (!route?.geometry || route.geometryFormat !== 'encoded_polyline_5') continue
         const points = decodePolyline(route.geometry)
         if (points.length < 2) continue
         const path = points.map(([lat, lng]) => ({ lat, lng }))
-        const color = route.origin.kind === 'WAREHOUSE' ? '#2563EB' : '#E11D48'
+        const warehouseRoute = route.origin.kind === 'WAREHOUSE'
+        drawRoutes.push({
+          path,
+          color: warehouseRoute ? '#2563EB' : '#E11D48',
+          // The customer route is narrower and drawn above the warehouse
+          // route, leaving blue edges visible where the road paths overlap.
+          weight: warehouseRoute ? 8 : 5,
+        })
+        for (const point of path) bounds.extend(point)
+      }
+
+      // Give each actual road path a white casing so it stays legible over
+      // detailed map labels, and draw both routes independently on the same map.
+      for (const route of drawRoutes) {
+        focusLinesRef.current.push(new window.google!.maps.Polyline({
+          map,
+          path: route.path,
+          strokeColor: '#ffffff',
+          strokeWeight: route.weight + 4,
+          strokeOpacity: 0.95,
+          clickable: false,
+        }))
+      }
+      for (const route of drawRoutes) {
         const line = new window.google!.maps.Polyline({
           map,
-          path,
-          strokeColor: color,
-          strokeWeight: 6,
-          strokeOpacity: 0.92,
+          path: route.path,
+          strokeColor: route.color,
+          strokeWeight: route.weight,
+          strokeOpacity: 1,
           clickable: false,
         })
         focusLinesRef.current.push(line)
-        for (const point of path) bounds.extend(point)
       }
       map.fitBounds(bounds, 48)
       return
