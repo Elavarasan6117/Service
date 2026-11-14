@@ -436,27 +436,6 @@ export function OperationsMap({
       const bounds = new window.google!.maps.LatLngBounds()
       for (const point of path) bounds.extend(point)
       map.fitBounds(bounds, 48)
-    } else if (nearest.latitude != null && nearest.longitude != null) {
-      const line = new window.google!.maps.Polyline({
-        map,
-        path: [
-          { lat: draftPoint.latitude, lng: draftPoint.longitude },
-          { lat: nearest.latitude, lng: nearest.longitude },
-        ],
-        strokeColor: color,
-        strokeOpacity: 0.7,
-        strokeWeight: 3,
-        icons: [{ icon: { path: 'M 0,-1 0,1', strokeOpacity: 1, scale: 4 }, offset: '0', repeat: '12px' }],
-        clickable: true,
-      })
-      const info = new window.google!.maps.InfoWindow({
-        content: 'Route geometry unavailable — straight line shown for reference only. Road distance is measured separately.',
-      })
-      line.addListener('click', (event) => {
-        if (event.latLng) info.setPosition(event.latLng)
-        info.open({ map })
-      })
-      focusLinesRef.current.push(line)
     }
   }, [result, draftPoint, routePreview, mapReady])
 

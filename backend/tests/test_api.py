@@ -52,13 +52,29 @@ async def test_route_preview_requires_authentication(client):
     assert response.status_code == 401
 
 
+async def test_stream_token_requires_access_token_and_returns_stream_scoped_token(
+    client, ops_user
+):
+    anonymous = await client.post("/api/v1/auth/stream-token")
+    assert anonymous.status_code == 401
+
+    authenticated = await client.post(
+        "/api/v1/auth/stream-token", headers=auth_headers(ops_user)
+    )
+    assert authenticated.status_code == 200, authenticated.text
+    body = authenticated.json()
+    assert body["streamToken"]
+    assert body["expiresIn"] == 300
+
+
 async def test_route_preview_rejects_out_of_range_coordinates(client, ops_user):
     response = await client.post(
         "/api/v1/routes/preview",
         headers=auth_headers(ops_user),
         json={"latitude": 95, "longitude": 80.27},
     )
-    assert response.status_code == 422
+    # The API's shared validation envelope uses 400 for request validation.
+    assert response.status_code == 400
     assert "latitude" in response.text.lower()
 
 
