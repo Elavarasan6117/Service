@@ -55,10 +55,17 @@ async def preview_vehicle_routes(
     warehouses = (await session.execute(select(Warehouse).where(
         Warehouse.status == EntityStatus.ACTIVE
     ))).scalars().all()
-    customers = (await session.execute(select(Customer).where(
-        Customer.latitude.is_not(None), Customer.longitude.is_not(None),
-        *([Customer.id != payload.exclude_customer_id] if payload.exclude_customer_id else []),
-    ))).scalars().all()
+    customer_filter = (
+        [Customer.id != payload.exclude_customer_id]
+        if payload.exclude_customer_id else []
+    )
+    existing_customers = (await session.execute(
+        select(Customer).where(*customer_filter)
+    )).scalars().all()
+    customers_with_coordinates = [
+        customer for customer in existing_customers
+        if customer.latitude is not None and customer.longitude is not None
+    ]
 
     def distance_km(lat: float, lng: float) -> float:
         lat1, lat2 = math.radians(payload.latitude), math.radians(lat)
@@ -72,9 +79,7 @@ async def preview_vehicle_routes(
         air = distance_km(lat, lng)
         if air <= payload.search_radius_km:
             candidates.append((PreviewOrigin(id=item.id, name=item.warehouse_name, kind="WAREHOUSE", latitude=lat, longitude=lng, distance_meters=0, address=item.address), Coordinate(lat, lng), air))
-    for item in customers:
-        if item.latitude is None or item.longitude is None:
-            continue
+    for item in customers_with_coordinates:
         lat, lng = float(item.latitude), float(item.longitude)
         air = distance_km(lat, lng)
         if air <= payload.search_radius_km:
@@ -93,24 +98,58 @@ async def preview_vehicle_routes(
     routes: list[PreviewRoute] = []
     road_ranked: list[tuple[PreviewOrigin, Coordinate, int]] = []
     provider = get_route_preview_provider()
-    provider_message = None
     route_status = {"WAREHOUSE": "NO_NEARBY_LOCATION", "CUSTOMER": "NO_NEARBY_LOCATION"}
     route_message: dict[str, str | None] = {"WAREHOUSE": None, "CUSTOMER": None}
+    has_warehouse_candidates = any(row[0].kind == "WAREHOUSE" for row in candidates)
+    has_customer_candidates = any(row[0].kind == "CUSTOMER" for row in candidates)
+    if not has_customer_candidates and existing_customers and not customers_with_coordinates:
+        route_status["CUSTOMER"] = "MISSING_COORDINATES"
+        route_message["CUSTOMER"] = (
+            "Existing customer records were found, but none have valid coordinates."
+        )
     for kind in ("WAREHOUSE", "CUSTOMER"):
         if any(row[0].kind == kind for row in candidates):
             route_status[kind] = "NO_DRIVING_ROUTE"
+
+    # A fake provider can synthesize distances and durations but has no road
+    # network geometry. Never present its values as a real driving route.
+    if provider.name == "fake":
+        message = (
+            "Configure ROUTE_PREVIEW_PROVIDER=google_maps and the server-side "
+            "GOOGLE_MAPS_API_KEY to calculate real road routes."
+        )
+        for kind, has_candidates in (
+            ("WAREHOUSE", has_warehouse_candidates),
+            ("CUSTOMER", has_customer_candidates),
+        ):
+            if has_candidates:
+                route_status[kind] = "REAL_ROUTING_PROVIDER_REQUIRED"
+                route_message[kind] = message
+        return RoutePreviewResponse(
+            destination_latitude=payload.latitude,
+            destination_longitude=payload.longitude,
+            nearest_warehouse=None,
+            nearest_customer=None,
+            routes=[],
+            warehouse_route_status=route_status["WAREHOUSE"],
+            customer_route_status=route_status["CUSTOMER"],
+            warehouse_route_message=route_message["WAREHOUSE"],
+            customer_route_message=route_message["CUSTOMER"],
+            message=message if has_warehouse_candidates or has_customer_candidates else None,
+        )
+
     if candidates:
         try:
             legs = await provider.get_driving_distances(
                 [row[1] for row in candidates], destination
             )
-        except ProviderError:
+        except ProviderError as exc:
             legs = []
-            provider_message = "Route service is temporarily unavailable. Please try again."
+            status, message = _route_provider_failure(exc)
             for kind in ("WAREHOUSE", "CUSTOMER"):
                 if any(row[0].kind == kind for row in candidates):
-                    route_status[kind] = "ROUTE_UNAVAILABLE"
-                    route_message[kind] = provider_message
+                    route_status[kind] = status
+                    route_message[kind] = message
         for (origin, coordinate, _), leg in zip(candidates, legs):
             if leg is not None:
                 road_ranked.append((origin.model_copy(update={"distance_meters": leg.distance_meters}), coordinate, leg.distance_meters))
@@ -130,8 +169,7 @@ async def preview_vehicle_routes(
                 route_status[origin.kind] = "NO_DRIVING_ROUTE"
                 route_message[origin.kind] = "No four-wheeler driving route is available."
             else:
-                route_status[origin.kind] = "ROUTE_UNAVAILABLE"
-                route_message[origin.kind] = "Driving route could not be calculated."
+                route_status[origin.kind], route_message[origin.kind] = _route_provider_failure(exc)
             continue
         if not alternatives:
             route_status[origin.kind] = "NO_DRIVING_ROUTE"
@@ -160,8 +198,30 @@ async def preview_vehicle_routes(
         customer_route_status=route_status["CUSTOMER"],
         warehouse_route_message=route_message["WAREHOUSE"],
         customer_route_message=route_message["CUSTOMER"],
-        message=provider_message or ("No nearby road-accessible locations found." if not routes else None),
+        message=("No nearby eligible Warehouse or existing Customer found." if not candidates else None),
     )
+
+
+def _route_provider_failure(exc: ProviderError) -> tuple[str, str]:
+    code = str(exc.code).upper()
+    message = str(exc.message)
+    lowered = message.lower()
+    if code == "PROVIDER_NOT_CONFIGURED":
+        return (
+            "ROUTING_API_KEY_MISSING",
+            "The server-side GOOGLE_MAPS_API_KEY is missing. Configure it in Render.",
+        )
+    if "billing" in lowered or "billingnotenabled" in lowered:
+        return "BILLING_OR_PERMISSION_ERROR", "Google Maps billing is not enabled for routing."
+    if code == "PROVIDER_REQUEST_DENIED" and any(
+        phrase in lowered for phrase in ("not enabled", "api project", "accessnotconfigured")
+    ):
+        return "ROUTING_API_NOT_ENABLED", "Enable the Google Directions API for the server key."
+    if code in ("PROVIDER_REQUEST_DENIED", "PROVIDER_INVALID_REQUEST"):
+        return "BILLING_OR_PERMISSION_ERROR", "Google rejected the route request. Check server-key API restrictions and billing."
+    if code in ("PROVIDER_QUOTA_EXCEEDED", "ROUTING_RATE_LIMITED"):
+        return "ROUTE_SERVICE_UNAVAILABLE", "Google Maps routing quota is unavailable. Check its quota and billing."
+    return "ROUTE_UNAVAILABLE", "The routing service is temporarily unavailable. Please retry."
 
 
 # --- Map ----------------------------------------------------------------

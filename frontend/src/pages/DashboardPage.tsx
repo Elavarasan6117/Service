@@ -90,26 +90,34 @@ export function DashboardPage({
     setRoutePreview(null)
     setRouteFailure(null)
     setRouteLoading(true)
+    let controller: AbortController | null = null
     const timer = window.setTimeout(async () => {
+      controller = new AbortController()
       try {
         const response = await api.previewRoutes(
           draftPoint.latitude,
           draftPoint.longitude,
           activeCustomer?.id,
           searchRadiusKm,
+          controller.signal,
         )
         if (routeRequestId.current !== requestId) return
         setRoutePreview(response)
-      } catch {
-        if (routeRequestId.current === requestId) {
+      } catch (exception) {
+        if (routeRequestId.current === requestId && !controller.signal.aborted) {
           setRoutePreview(null)
-          setRouteFailure('Unable to calculate nearby driving routes. Please try again.')
+          setRouteFailure(exception instanceof ApiError
+            ? exception.message
+            : 'Unable to calculate nearby driving routes. Please try again.')
         }
       } finally {
         if (routeRequestId.current === requestId) setRouteLoading(false)
       }
     }, 450)
-    return () => window.clearTimeout(timer)
+    return () => {
+      window.clearTimeout(timer)
+      controller?.abort()
+    }
   }, [draftPoint, activeCustomer?.id, searchRadiusKm])
 
   const refresh = useCallback(async () => {

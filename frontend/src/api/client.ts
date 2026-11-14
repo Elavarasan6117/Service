@@ -271,10 +271,17 @@ export const api = {
   mapOperations: (params: Record<string, string | number | undefined> = {}) =>
     request<MapOperations>(`/map/operations${qs(params)}`),
 
-  previewRoutes: (latitude: number, longitude: number, excludeCustomerId?: string, searchRadiusKm = 25) =>
+  previewRoutes: (
+    latitude: number,
+    longitude: number,
+    excludeCustomerId?: string,
+    searchRadiusKm = 25,
+    signal?: AbortSignal,
+  ) =>
     request<RoutePreviewResult>('/routes/preview', {
       method: 'POST',
       body: JSON.stringify({ latitude, longitude, excludeCustomerId, searchRadiusKm }),
+      signal,
     }),
 
   dashboardMetrics: () => request<DashboardMetrics>('/dashboard/metrics'),

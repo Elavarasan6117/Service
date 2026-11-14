@@ -7,6 +7,7 @@ from decimal import Decimal
 import pytest
 
 from app.models.service_location import ServiceLocation
+from app.providers.base import RouteDetail, RouteLeg
 from tests.conftest import auth_headers
 
 
@@ -50,8 +51,27 @@ async def test_route_preview_requires_authentication(client):
 
 
 async def test_route_preview_uses_active_warehouse_and_returns_road_route(
-    client, ops_user, warehouse
+    client, ops_user, warehouse, monkeypatch
 ):
+    class StubRoadProvider:
+        name = "google_maps"
+
+        async def get_driving_distances(self, origins, destination):
+            return [RouteLeg(4200, 720, provider=self.name) for _ in origins]
+
+        async def get_driving_routes(self, origin, destination):
+            return [RouteDetail(
+                distance_meters=4200,
+                duration_seconds=720,
+                geometry="_p~iF~ps|U_ulLnnqC_mqNvxq`@",
+                geometry_format="encoded_polyline_5",
+                provider=self.name,
+            )]
+
+    monkeypatch.setattr(
+        "app.api.v1.map_dashboard.get_route_preview_provider",
+        lambda: StubRoadProvider(),
+    )
     response = await client.post(
         "/api/v1/routes/preview",
         headers=auth_headers(ops_user),
@@ -64,6 +84,7 @@ async def test_route_preview_uses_active_warehouse_and_returns_road_route(
     assert body["routes"]
     assert body["routes"][0]["distanceMeters"] > 0
     assert body["routes"][0]["availability"] == "CALCULATED_UNVERIFIED"
+    assert body["routes"][0]["geometry"] == "_p~iF~ps|U_ulLnnqC_mqNvxq`@"
     assert body["warehouseRouteStatus"] == "CALCULATED_UNVERIFIED"
     assert body["customerRouteStatus"] == "NO_NEARBY_LOCATION"
 

@@ -12,21 +12,39 @@ interface Props {
 const statusText: Record<string, string> = {
   CALCULATED_UNVERIFIED: 'Calculated · four-wheeler access unverified',
   ROUTE_GEOMETRY_UNAVAILABLE: 'Road distance calculated, but route geometry is unavailable to draw',
+  REAL_ROUTING_PROVIDER_REQUIRED: 'A real routing provider is required; fake routing cannot supply road geometry',
   NO_NEARBY_LOCATION: 'No nearby active location found',
+  MISSING_COORDINATES: 'Existing customer records need valid latitude and longitude',
   NO_DRIVING_ROUTE: 'No driving route is available',
+  ROUTING_API_KEY_MISSING: 'Server-side Google Maps API key is missing',
+  ROUTING_API_NOT_ENABLED: 'Enable Directions API for the server-side Google key',
+  BILLING_OR_PERMISSION_ERROR: 'Google Maps billing or server-key permissions need attention',
+  ROUTE_SERVICE_UNAVAILABLE: 'Google Maps routing quota or service is unavailable',
   ROUTE_UNAVAILABLE: 'Route service is temporarily unavailable',
 }
 
 export function RoutePreviewPanel({ result, loading, error, searchRadiusKm, onSearchRadiusChange }: Props) {
   const warehouseRoute = result?.routes.find((route) => route.origin.kind === 'WAREHOUSE') ?? null
   const customerRoute = result?.routes.find((route) => route.origin.kind === 'CUSTOMER') ?? null
+  const comparison = warehouseRoute && customerRoute
+    ? {
+        shorter: warehouseRoute.distanceMeters === customerRoute.distanceMeters
+          ? 'Both routes have the same road distance.'
+          : `${warehouseRoute.distanceMeters < customerRoute.distanceMeters ? 'Route A' : 'Route B'} is shorter by ${(Math.abs(warehouseRoute.distanceMeters - customerRoute.distanceMeters) / 1000).toFixed(2)} km.`,
+        quicker: warehouseRoute.durationSeconds == null || customerRoute.durationSeconds == null
+          ? 'Travel-time comparison unavailable.'
+          : warehouseRoute.durationSeconds === customerRoute.durationSeconds
+            ? 'Both routes have the same estimated travel time.'
+            : `${warehouseRoute.durationSeconds < customerRoute.durationSeconds ? 'Route A' : 'Route B'} is quicker by ${Math.max(1, Math.round(Math.abs(warehouseRoute.durationSeconds - customerRoute.durationSeconds) / 60))} min.`,
+      }
+    : null
 
   return (
     <section className="route-preview" aria-live="polite">
       <header className="route-preview__header">
         <div>
           <h3>Four-wheeler route comparison</h3>
-          <p>Both driving routes are shown on the map</p>
+          <p>Available road routes are drawn on the map independently</p>
         </div>
         {loading && <span className="route-preview__loading">Calculating routes…</span>}
         <label className="route-preview__radius">Search radius
@@ -59,6 +77,11 @@ export function RoutePreviewPanel({ result, loading, error, searchRadiusKm, onSe
             destination={result}
             color="customer"
           />
+        </div>
+        <div className="route-preview__comparison" aria-live="polite">
+          {comparison
+            ? <><span>{comparison.shorter}</span><span>{comparison.quicker}</span></>
+            : <span>Route comparison is unavailable until both road routes are calculated.</span>}
         </div>
       </>}
     </section>

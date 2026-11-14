@@ -336,8 +336,8 @@ export function OperationsMap({
         CUSTOMER: routePreview.routes.find((route) => route.origin.kind === 'CUSTOMER'),
       }
       const origins = [
-        { kind: 'WAREHOUSE' as const, origin: routePreview.nearestWarehouse, route: routeByKind.WAREHOUSE, color: '#2563EB', label: 'W' },
-        { kind: 'CUSTOMER' as const, origin: routePreview.nearestCustomer, route: routeByKind.CUSTOMER, color: '#E11D48', label: 'C' },
+        { kind: 'WAREHOUSE' as const, origin: routePreview.nearestWarehouse, color: '#4b2e83', label: 'W' },
+        { kind: 'CUSTOMER' as const, origin: routePreview.nearestCustomer, color: '#17803d', label: 'C' },
       ]
       for (const item of origins) {
         if (!item.origin) continue
