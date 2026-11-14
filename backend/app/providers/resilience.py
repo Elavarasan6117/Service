@@ -294,7 +294,7 @@ class ResilientRoutingProvider:
             if method is not None:
                 return await _call_with_retry(
                     lambda: method(origins, destination), provider=self.name,
-                    operation="distance_matrix", breaker=self._breaker,
+                    operation="routes_compute_route_matrix", breaker=self._breaker,
                 )
             results = []
             for origin in origins:

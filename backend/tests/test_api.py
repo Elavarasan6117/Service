@@ -8,6 +8,8 @@ import pytest
 
 from app.models.service_location import ServiceLocation
 from app.providers.base import RouteDetail, RouteLeg
+from app.core.errors import RoutingProviderError
+from app.api.v1.map_dashboard import _route_provider_failure
 from tests.conftest import auth_headers
 
 
@@ -58,6 +60,16 @@ async def test_route_preview_rejects_out_of_range_coordinates(client, ops_user):
     )
     assert response.status_code == 422
     assert "latitude" in response.text.lower()
+
+
+def test_route_preview_error_preserves_safe_google_detail():
+    fake_key = "AIza" + "A" * 35
+    status_code, message = _route_provider_failure(RoutingProviderError(
+        f"API key not valid: {fake_key}", code="PROVIDER_REQUEST_DENIED"
+    ))
+    assert status_code == "ROUTING_API_KEY_INVALID"
+    assert "API key not valid" in message
+    assert fake_key not in message
 
 
 async def test_route_preview_uses_active_warehouse_and_returns_road_route(

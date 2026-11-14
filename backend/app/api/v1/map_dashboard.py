@@ -38,6 +38,7 @@ from app.providers.base import Coordinate
 from app.providers.registry import get_route_preview_provider
 from app.schemas.misc import RoutePreviewRequest, RoutePreviewResponse, PreviewOrigin, PreviewRoute
 import math
+import re
 
 router = APIRouter(tags=["map-and-dashboard"])
 
@@ -204,34 +205,51 @@ async def preview_vehicle_routes(
 
 def _route_provider_failure(exc: ProviderError) -> tuple[str, str]:
     code = str(exc.code).upper()
-    message = str(exc.message)
+    message = _safe_route_provider_detail(str(exc.message))
     lowered = message.lower()
+
+    def with_google_detail(summary: str) -> str:
+        if not message or message in (
+            "The routing provider did not respond in time. Please retry.",
+            "The routing provider rate limit was reached. Please retry shortly.",
+        ):
+            return summary
+        return f"{summary} Google response: {message}"
+
     if code == "PROVIDER_NOT_CONFIGURED":
         return (
             "ROUTING_API_KEY_MISSING",
             "The server-side GOOGLE_MAPS_API_KEY is missing. Configure it in Render.",
         )
     if code == "PROVIDER_UNAUTHENTICATED":
-        return "ROUTING_API_KEY_INVALID", "Google rejected the server API key. Check that it is valid and configured for server use."
+        return "ROUTING_API_KEY_INVALID", with_google_detail("Google rejected the server API key. Check that it is valid and configured for server use.")
     if "billing" in lowered or "billingnotenabled" in lowered:
-        return "BILLING_OR_PERMISSION_ERROR", "Google Maps billing is not enabled for routing."
+        return "BILLING_OR_PERMISSION_ERROR", with_google_detail("Google Maps billing is not enabled for routing.")
     if code == "PROVIDER_REQUEST_DENIED":
         if any(phrase in lowered for phrase in ("not enabled", "api project", "accessnotconfigured", "routes api")):
-            return "ROUTING_API_NOT_ENABLED", "Enable Google Routes API for this project and allow it on the server API key."
+            return "ROUTING_API_NOT_ENABLED", with_google_detail("Enable Google Routes API for this project and allow it on the server API key.")
         if any(phrase in lowered for phrase in ("api key not valid", "invalid api key", "api key is invalid")):
-            return "ROUTING_API_KEY_INVALID", "Google rejected the server API key. Check that the key is valid and configured for server use."
+            return "ROUTING_API_KEY_INVALID", with_google_detail("Google rejected the server API key. Check that the key is valid and configured for server use.")
         if any(phrase in lowered for phrase in ("ip address", "referer", "application restriction", "restricted")):
-            return "ROUTING_API_KEY_RESTRICTED", "Google rejected the server key restriction. Check its application restrictions for Render server requests."
-        return "BILLING_OR_PERMISSION_ERROR", "Google denied route access. Check billing, Routes API enablement, and server-key restrictions."
+            return "ROUTING_API_KEY_RESTRICTED", with_google_detail("Google rejected the server key restriction. Check its application restrictions for Render server requests.")
+        return "BILLING_OR_PERMISSION_ERROR", with_google_detail("Google denied route access. Check billing, Routes API enablement, and server-key restrictions.")
     if code == "PROVIDER_INVALID_REQUEST":
-        return "ROUTING_INVALID_REQUEST", "Google rejected the route coordinates or request fields. Check the server routing diagnostics."
+        return "ROUTING_INVALID_REQUEST", with_google_detail("Google rejected the route coordinates or request fields.")
     if code in ("PROVIDER_QUOTA_EXCEEDED", "ROUTING_RATE_LIMITED"):
-        return "ROUTE_SERVICE_UNAVAILABLE", "Google Routes API quota or rate limit was reached. Check quota and billing, then retry."
+        return "ROUTE_SERVICE_UNAVAILABLE", with_google_detail("Google Routes API quota or rate limit was reached. Check quota and billing, then retry.")
     if code == "ROUTING_CIRCUIT_OPEN":
         return "ROUTE_SERVICE_UNAVAILABLE", message
     if code == "ROUTING_TIMEOUT":
         return "ROUTE_SERVICE_UNAVAILABLE", "Google Routes API timed out. Please retry."
     return "ROUTE_UNAVAILABLE", "The routing service is temporarily unavailable. Please retry."
+
+
+def _safe_route_provider_detail(message: str) -> str:
+    """Retain useful provider diagnostics without returning credentials."""
+    safe = re.sub(r"AIza[0-9A-Za-z_-]{20,}", "[redacted API key]", message)
+    safe = re.sub(r"(?i)(api[_-]?key|access[_-]?token)\s*=\s*[^\s&,;]+", r"\1=[redacted]", safe)
+    safe = re.sub(r"(?i)bearer\s+[^\s,;]+", "Bearer [redacted]", safe)
+    return safe[:240]
 
 
 # --- Map ----------------------------------------------------------------
