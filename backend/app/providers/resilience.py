@@ -237,6 +237,38 @@ class ResilientRoutingProvider:
                 breaker=self._fallback_breaker,
             )
 
+    async def get_driving_distances(
+        self, origins: list[Coordinate], destination: Coordinate
+    ) -> list[RouteLeg | None]:
+        if not origins:
+            return []
+        method = getattr(self.inner, "get_driving_distances", None)
+        try:
+            if method is not None:
+                return await _call_with_retry(
+                    lambda: method(origins, destination), provider=self.name,
+                    operation="distance_matrix", breaker=self._breaker,
+                )
+            results = []
+            for origin in origins:
+                results.extend(await self.get_driving_distance(origin, [destination]))
+            return results
+        except ProviderError:
+            if self.fallback is None:
+                raise
+            fallback_method = getattr(self.fallback, "get_driving_distances", None)
+            if fallback_method is not None:
+                assert self._fallback_breaker is not None
+                return await _call_with_retry(
+                    lambda: fallback_method(origins, destination),
+                    provider=self.fallback.name, operation="distance_matrix",
+                    breaker=self._fallback_breaker,
+                )
+            results = []
+            for origin in origins:
+                results.extend(await self.fallback.get_driving_distance(origin, [destination]))
+            return results
+
     async def get_driving_route(
         self, origin: Coordinate, destination: Coordinate
     ) -> RouteDetail:
@@ -256,6 +288,29 @@ class ResilientRoutingProvider:
                 provider=self.fallback.name,
                 operation="directions",
                 breaker=self._fallback_breaker,
+            )
+
+    async def get_driving_routes(
+        self, origin: Coordinate, destination: Coordinate
+    ) -> list[RouteDetail]:
+        async def routes(provider: Any) -> list[RouteDetail]:
+            method = getattr(provider, "get_driving_routes", None)
+            if method is not None:
+                return await method(origin, destination)
+            return [await provider.get_driving_route(origin, destination)]
+
+        try:
+            return await _call_with_retry(
+                lambda: routes(self.inner), provider=self.name,
+                operation="directions_alternatives", breaker=self._breaker,
+            )
+        except ProviderError:
+            if self.fallback is None:
+                raise
+            assert self._fallback_breaker is not None
+            return await _call_with_retry(
+                lambda: routes(self.fallback), provider=self.fallback.name,
+                operation="directions_alternatives", breaker=self._fallback_breaker,
             )
 
     async def health_check(self) -> bool:

@@ -255,6 +255,42 @@ class MapOperationsResponse(CamelModel):
     generated_at: datetime
 
 
+class RoutePreviewRequest(CamelModel):
+    latitude: float = Field(..., ge=-90, le=90)
+    longitude: float = Field(..., ge=-180, le=180)
+    exclude_customer_id: uuid.UUID | None = None
+    search_radius_km: float = Field(25, ge=1, le=50)
+
+
+class PreviewOrigin(CamelModel):
+    id: uuid.UUID
+    name: str
+    kind: str
+    latitude: float
+    longitude: float
+    distance_meters: int
+
+
+class PreviewRoute(CamelModel):
+    id: str
+    origin: PreviewOrigin
+    distance_meters: int
+    duration_seconds: int | None
+    geometry: str | None
+    geometry_format: str
+    provider: str
+    availability: str = "CALCULATED_UNVERIFIED"
+
+
+class RoutePreviewResponse(CamelModel):
+    destination_latitude: float
+    destination_longitude: float
+    nearest_warehouse: PreviewOrigin | None
+    nearest_customer: PreviewOrigin | None
+    routes: list[PreviewRoute]
+    message: str | None = None
+
+
 # --- Dashboard ----------------------------------------------------------
 
 

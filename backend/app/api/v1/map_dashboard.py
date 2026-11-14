@@ -13,7 +13,7 @@ from sqlalchemy import Numeric, cast, func, select
 from app.api.deps import ConfigDep, DbSession, require
 from app.core.config import settings
 from app.core.enums import EntityStatus, LocationStatus, Permission, ServiceStatus
-from app.core.errors import NotFoundError
+from app.core.errors import NotFoundError, ProviderError
 from app.models.customer import Customer
 from app.models.route import Route
 from app.models.service_location import ServiceLocation
@@ -34,10 +34,105 @@ from app.schemas.misc import (
 from app.services.config_service import KEY_THRESHOLD
 from app.services.spatial_search import SpatialSearchService
 from app.models.user import User
+from app.providers.base import Coordinate
+from app.providers.registry import get_route_preview_provider
+from app.schemas.misc import RoutePreviewRequest, RoutePreviewResponse, PreviewOrigin, PreviewRoute
+import math
 
 router = APIRouter(tags=["map-and-dashboard"])
 
 IST = ZoneInfo(settings.TIMEZONE)
+
+
+@router.post("/routes/preview", response_model=RoutePreviewResponse)
+async def preview_vehicle_routes(
+    payload: RoutePreviewRequest,
+    session: DbSession,
+    user: User = Depends(require(Permission.VIEW)),
+) -> RoutePreviewResponse:
+    """Return temporary four-wheeler route options from nearby active records."""
+    destination = Coordinate(payload.latitude, payload.longitude)
+    warehouses = (await session.execute(select(Warehouse).where(
+        Warehouse.status == EntityStatus.ACTIVE
+    ))).scalars().all()
+    customers = (await session.execute(select(Customer).where(
+        Customer.latitude.is_not(None), Customer.longitude.is_not(None),
+        *([Customer.id != payload.exclude_customer_id] if payload.exclude_customer_id else []),
+    ))).scalars().all()
+
+    def distance_km(lat: float, lng: float) -> float:
+        lat1, lat2 = math.radians(payload.latitude), math.radians(lat)
+        dlat, dlng = lat2 - lat1, math.radians(lng - payload.longitude)
+        a = math.sin(dlat / 2) ** 2 + math.cos(lat1) * math.cos(lat2) * math.sin(dlng / 2) ** 2
+        return 6371.0088 * 2 * math.asin(math.sqrt(a))
+
+    candidates: list[tuple[PreviewOrigin, Coordinate, float]] = []
+    for item in warehouses:
+        lat, lng = float(item.latitude), float(item.longitude)
+        air = distance_km(lat, lng)
+        if air <= payload.search_radius_km:
+            candidates.append((PreviewOrigin(id=item.id, name=item.warehouse_name, kind="WAREHOUSE", latitude=lat, longitude=lng, distance_meters=0), Coordinate(lat, lng), air))
+    for item in customers:
+        if item.latitude is None or item.longitude is None:
+            continue
+        lat, lng = float(item.latitude), float(item.longitude)
+        air = distance_km(lat, lng)
+        if air <= payload.search_radius_km:
+            candidates.append((PreviewOrigin(id=item.id, name=item.customer_name, kind="CUSTOMER", latitude=lat, longitude=lng, distance_meters=0), Coordinate(lat, lng), air))
+
+    # Keep a broad geographic shortlist for each origin type. Road distances,
+    # never straight-line distance, determine the displayed ranking. Keeping
+    # the types separately prevents many nearby customers from hiding a warehouse.
+    candidates = [
+        row for kind in ("WAREHOUSE", "CUSTOMER")
+        for row in sorted(
+            (candidate for candidate in candidates if candidate[0].kind == kind),
+            key=lambda candidate: candidate[2],
+        )[:12]
+    ]
+    routes: list[PreviewRoute] = []
+    road_ranked: list[tuple[PreviewOrigin, Coordinate, int]] = []
+    provider = get_route_preview_provider()
+    provider_message = None
+    if candidates:
+        try:
+            legs = await provider.get_driving_distances(
+                [row[1] for row in candidates], destination
+            )
+        except ProviderError:
+            legs = []
+            provider_message = "Route service is temporarily unavailable. Please try again."
+        for (origin, coordinate, _), leg in zip(candidates, legs):
+            if leg is not None:
+                road_ranked.append((origin.model_copy(update={"distance_meters": leg.distance_meters}), coordinate, leg.distance_meters))
+
+    # Keep the nearest road-accessible warehouse and customer, then request
+    # Directions alternatives for each selected origin.
+    selected: list[tuple[PreviewOrigin, Coordinate, int]] = []
+    for kind in ("WAREHOUSE", "CUSTOMER"):
+        match = next((row for row in sorted(road_ranked, key=lambda row: row[2]) if row[0].kind == kind), None)
+        if match:
+            selected.append(match)
+    for origin, coordinate, _ in selected:
+        try:
+            alternatives = await provider.get_driving_routes(coordinate, destination)
+        except ProviderError:
+            continue
+        for index, route in enumerate(alternatives):
+            routes.append(PreviewRoute(
+                id=f"{origin.kind.lower()}-{origin.id}-{index}", origin=origin,
+                distance_meters=route.distance_meters,
+                duration_seconds=route.duration_seconds, geometry=route.geometry,
+                geometry_format=route.geometry_format, provider=route.provider,
+            ))
+    routes.sort(key=lambda route: route.distance_meters)
+    return RoutePreviewResponse(
+        destination_latitude=payload.latitude, destination_longitude=payload.longitude,
+        nearest_warehouse=next((row[0] for row in selected if row[0].kind == "WAREHOUSE"), None),
+        nearest_customer=next((row[0] for row in selected if row[0].kind == "CUSTOMER"), None),
+        routes=routes,
+        message=provider_message or ("No nearby road-accessible locations found." if not routes else None),
+    )
 
 
 # --- Map ----------------------------------------------------------------

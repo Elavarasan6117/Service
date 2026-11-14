@@ -39,6 +39,7 @@ _GEOCODING_FACTORIES: dict[str, Any] = {
 }
 
 _routing: ResilientRoutingProvider | None = None
+_route_preview: ResilientRoutingProvider | None = None
 _geocoding: ResilientGeocodingProvider | None = None
 
 
@@ -89,6 +90,24 @@ def get_routing_provider() -> ResilientRoutingProvider:
     return _routing
 
 
+def get_route_preview_provider() -> ResilientRoutingProvider:
+    """Provider for display-only route previews; defaults to routing config."""
+    global _route_preview
+    key = settings.ROUTE_PREVIEW_PROVIDER.strip().lower()
+    if not key or key == settings.ROUTING_PROVIDER.strip().lower():
+        return get_routing_provider()
+    if _route_preview is None:
+        factory = _ROUTING_FACTORIES.get(key)
+        if factory is None:
+            raise ConfigurationError(
+                f"Unknown ROUTE_PREVIEW_PROVIDER '{key}'. "
+                f"Available: {', '.join(sorted(_ROUTING_FACTORIES))}."
+            )
+        _route_preview = ResilientRoutingProvider(factory())
+        logger.info("route_preview_provider_selected", provider=key)
+    return _route_preview
+
+
 def get_geocoding_provider() -> ResilientGeocodingProvider:
     global _geocoding
     if _geocoding is None:
@@ -109,7 +128,10 @@ def set_geocoding_provider(provider: Any) -> None:
 
 
 async def close_providers() -> None:
-    global _routing, _geocoding
+    global _routing, _route_preview, _geocoding
+    if _route_preview is not None and _route_preview is not _routing:
+        await _route_preview.close()
+        _route_preview = None
     if _routing is not None:
         await _routing.close()
         _routing = None

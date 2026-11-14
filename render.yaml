@@ -38,6 +38,10 @@ services:
         value: --demo
       - key: ROUTING_PROVIDER
         value: fake
+      # Route previews use real driving routes while preserving the existing
+      # demo serviceability provider and its decisions.
+      - key: ROUTE_PREVIEW_PROVIDER
+        value: google_maps
       - key: GEOCODING_PROVIDER
         value: google_maps
       - key: GOOGLE_MAPS_API_KEY

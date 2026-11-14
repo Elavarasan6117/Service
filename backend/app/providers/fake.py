@@ -95,6 +95,24 @@ class FakeRoutingProvider:
             )
         return legs
 
+    async def get_driving_distances(
+        self, origins: list[Coordinate], destination: Coordinate
+    ) -> list[RouteLeg | None]:
+        self.call_count += 1
+        self.element_count += len(origins)
+        if self.fail:
+            raise RoutingProviderError(self.fail_message)
+        legs = []
+        for origin in origins:
+            meters = self._distance(origin, destination)
+            legs.append(RouteLeg(
+                distance_meters=meters,
+                duration_seconds=max(60, int(meters / 8.33)),
+                distance_type=DistanceType.ROAD_DISTANCE,
+                provider=self.name,
+            ) if meters is not None else None)
+        return legs
+
     async def get_driving_route(
         self, origin: Coordinate, destination: Coordinate
     ) -> RouteDetail:

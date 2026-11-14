@@ -1,9 +1,10 @@
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { Link } from 'react-router-dom'
 
 import { api, ApiError } from '../api/client'
 import { CustomerForm } from '../components/CustomerForm'
 import { OperationsMap } from '../components/OperationsMap'
+import { RoutePreviewPanel } from '../components/RoutePreviewPanel'
 import { QuickAddLocationForm } from '../components/QuickAddLocationForm'
 import { ServiceabilityResultPanel } from '../components/ServiceabilityResultPanel'
 import { StatusBadge } from '../components/StatusBadge'
@@ -14,6 +15,7 @@ import type {
   MapOperations,
   ServiceabilityCheck,
   ServiceabilityResult,
+  RoutePreviewResult,
 } from '../types/api'
 
 function straightLineMeters(
@@ -99,6 +101,40 @@ export function DashboardPage({
     longitude: number
     address: string
   } | null>(null)
+  const [routePreview, setRoutePreview] = useState<RoutePreviewResult | null>(null)
+  const [routeLoading, setRouteLoading] = useState(false)
+  const [selectedRouteId, setSelectedRouteId] = useState<string | null>(null)
+  const [searchRadiusKm, setSearchRadiusKm] = useState(25)
+  const routeRequestId = useRef(0)
+
+  useEffect(() => {
+    const requestId = ++routeRequestId.current
+    if (!draftPoint) {
+      setRoutePreview(null)
+      setSelectedRouteId(null)
+      setRouteLoading(false)
+      return
+    }
+    const timer = window.setTimeout(async () => {
+      setRouteLoading(true)
+      try {
+        const response = await api.previewRoutes(
+          draftPoint.latitude,
+          draftPoint.longitude,
+          activeCustomer?.id,
+          searchRadiusKm,
+        )
+        if (routeRequestId.current !== requestId) return
+        setRoutePreview(response)
+        setSelectedRouteId(response.routes[0]?.id ?? null)
+      } catch {
+        if (routeRequestId.current === requestId) setRoutePreview(null)
+      } finally {
+        if (routeRequestId.current === requestId) setRouteLoading(false)
+      }
+    }, 450)
+    return () => window.clearTimeout(timer)
+  }, [draftPoint, activeCustomer?.id, searchRadiusKm])
 
   const refresh = useCallback(async () => {
     try {
@@ -435,6 +471,8 @@ export function DashboardPage({
               data={mapData}
               result={result}
               draftPoint={draftPoint}
+              routePreview={routePreview}
+              selectedRouteId={selectedRouteId}
               draggable={canAdjustLocation}
               onDragEnd={(latitude, longitude) => {
                 handleMapLocation(latitude, longitude)
@@ -458,6 +496,14 @@ export function DashboardPage({
                 if (id === 'warehouse-draft') setWarehouseDraftPoint({ latitude, longitude })
                 else if (id === 'service-draft') setServiceDraftPoint({ latitude, longitude })
               }}
+            />
+            <RoutePreviewPanel
+              result={routePreview}
+              loading={routeLoading}
+              selectedId={selectedRouteId}
+              onSelect={setSelectedRouteId}
+              searchRadiusKm={searchRadiusKm}
+              onSearchRadiusChange={setSearchRadiusKm}
             />
           </div>
         </div>

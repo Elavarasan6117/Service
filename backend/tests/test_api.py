@@ -42,6 +42,30 @@ async def test_protected_endpoint_rejects_anonymous(client):
     assert response.json()["error"]["code"] == "UNAUTHENTICATED"
 
 
+async def test_route_preview_requires_authentication(client):
+    response = await client.post(
+        "/api/v1/routes/preview", json={"latitude": 13.08, "longitude": 80.27}
+    )
+    assert response.status_code == 401
+
+
+async def test_route_preview_uses_active_warehouse_and_returns_road_route(
+    client, ops_user, warehouse
+):
+    response = await client.post(
+        "/api/v1/routes/preview",
+        headers=auth_headers(ops_user),
+        json={"latitude": 13.08, "longitude": 80.27},
+    )
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["nearestWarehouse"]["id"] == str(warehouse.id)
+    assert body["nearestCustomer"] is None
+    assert body["routes"]
+    assert body["routes"][0]["distanceMeters"] > 0
+    assert body["routes"][0]["availability"] == "CALCULATED_UNVERIFIED"
+
+
 async def test_login_succeeds_and_returns_tokens(client, ops_user):
     response = await client.post(
         "/api/v1/auth/login",

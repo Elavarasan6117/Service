@@ -168,6 +168,46 @@ class GoogleMapsProvider:
             results.extend(await self._distance_matrix_chunk(origin, chunk))
         return results
 
+    async def get_driving_distances(
+        self, origins: list[Coordinate], destination: Coordinate
+    ) -> list[RouteLeg | None]:
+        """Road distances in the requested direction from many origins to one point."""
+        results: list[RouteLeg | None] = []
+        for start in range(0, len(origins), _MAX_DESTINATIONS_PER_REQUEST):
+            chunk = origins[start : start + _MAX_DESTINATIONS_PER_REQUEST]
+            payload = await self._get(
+                "/distancematrix/json",
+                {
+                    "origins": "|".join(str(origin) for origin in chunk),
+                    "destinations": str(destination),
+                    "mode": "driving",
+                    "units": "metric",
+                    "region": settings.GOOGLE_MAPS_REGION,
+                    "language": settings.GOOGLE_MAPS_LANGUAGE,
+                },
+            )
+            rows = payload.get("rows") or []
+            if len(rows) != len(chunk):
+                raise RoutingProviderError(
+                    "Distance Matrix returned a mismatched number of origin rows.",
+                    code="PROVIDER_RESPONSE_MISALIGNED",
+                )
+            for row in rows:
+                elements = row.get("elements") or []
+                if len(elements) != 1 or elements[0].get("status") != "OK":
+                    results.append(None)
+                    continue
+                element = elements[0]
+                distance = element.get("distance", {}).get("value")
+                duration = element.get("duration", {}).get("value")
+                results.append(RouteLeg(
+                    distance_meters=int(round(float(distance))),
+                    duration_seconds=int(duration) if duration is not None else None,
+                    distance_type=DistanceType.ROAD_DISTANCE,
+                    provider=self.name,
+                ) if distance is not None else None)
+        return results
+
     async def _distance_matrix_chunk(
         self, origin: Coordinate, destinations: list[Coordinate]
     ) -> list[RouteLeg | None]:
@@ -223,12 +263,18 @@ class GoogleMapsProvider:
     async def get_driving_route(
         self, origin: Coordinate, destination: Coordinate
     ) -> RouteDetail:
+        return (await self.get_driving_routes(origin, destination))[0]
+
+    async def get_driving_routes(
+        self, origin: Coordinate, destination: Coordinate
+    ) -> list[RouteDetail]:
         payload = await self._get(
             "/directions/json",
             {
                 "origin": str(origin),
                 "destination": str(destination),
                 "mode": "driving",
+                "alternatives": "true",
                 "units": "metric",
                 "region": settings.GOOGLE_MAPS_REGION,
                 "language": settings.GOOGLE_MAPS_LANGUAGE,
@@ -240,18 +286,20 @@ class GoogleMapsProvider:
                 "No driving route found between these points.",
                 code="PROVIDER_NO_ROUTE",
             )
-        route = routes[0]
-        legs = route.get("legs") or []
-        distance = sum(leg.get("distance", {}).get("value", 0) for leg in legs)
-        duration = sum(leg.get("duration", {}).get("value", 0) for leg in legs)
-        geometry = (route.get("overview_polyline") or {}).get("points")
-        return RouteDetail(
-            distance_meters=int(round(float(distance))),
-            duration_seconds=int(duration) if duration else None,
-            geometry=geometry,
-            geometry_format="encoded_polyline_5" if geometry else "none",
-            provider=self.name,
-        )
+        details = []
+        for route in routes:
+            legs = route.get("legs") or []
+            distance = sum(leg.get("distance", {}).get("value", 0) for leg in legs)
+            duration = sum(leg.get("duration", {}).get("value", 0) for leg in legs)
+            geometry = (route.get("overview_polyline") or {}).get("points")
+            details.append(RouteDetail(
+                distance_meters=int(round(float(distance))),
+                duration_seconds=int(duration) if duration else None,
+                geometry=geometry,
+                geometry_format="encoded_polyline_5" if geometry else "none",
+                provider=self.name,
+            ))
+        return details
 
     # -- geocoding -------------------------------------------------------
 

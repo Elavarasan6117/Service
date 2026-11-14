@@ -1,12 +1,15 @@
 import { useEffect, useRef, useState } from 'react'
 
-import type { MapOperations, ServiceabilityResult } from '../types/api'
+import type { MapOperations, RoutePreviewResult, ServiceabilityResult } from '../types/api'
 import { STATUS_MARKER_COLOR } from './StatusBadge'
 import { decodePolyline } from '../lib/polyline'
 
 interface Props {
   data: MapOperations | null
   result: ServiceabilityResult | null
+  routePreview?: RoutePreviewResult | null
+  selectedRouteId?: string | null
+  /** The point currently being assessed, which the operator can drag. */
   draftPoint: { latitude: number; longitude: number } | null
   draggable: boolean
   onDragEnd?: (latitude: number, longitude: number) => void
@@ -81,6 +84,8 @@ function escapeHtml(value: string): string {
 export function OperationsMap({
   data,
   result,
+  routePreview = null,
+  selectedRouteId = null,
   draftPoint,
   draggable,
   onDragEnd,
@@ -258,7 +263,7 @@ export function OperationsMap({
         title: 'New customer — drag to correct, then Confirm',
         draggable,
         zIndex: 1000,
-        icon: markerIcon('#111827', 11),
+        icon: markerIcon('#d92d20', 11),
       })
       marker.addListener('dragend', () => {
         const point = marker.getPosition()
@@ -324,6 +329,32 @@ export function OperationsMap({
     for (const line of focusLinesRef.current) line.setMap(null)
     focusMarkersRef.current = []
     focusLinesRef.current = []
+    if (routePreview && draftPoint) {
+      const visiblePoints: google.maps.LatLngLiteral[] = []
+      for (const route of routePreview.routes) {
+        if (!route.geometry || route.geometryFormat !== 'encoded_polyline_5') continue
+        const points = decodePolyline(route.geometry)
+        if (points.length < 2) continue
+        const selected = route.id === selectedRouteId
+        const path = points.map(([lat, lng]) => ({ lat, lng }))
+        const line = new window.google!.maps.Polyline({
+          map,
+          path,
+          strokeColor: selected ? '#0f7b3d' : route.origin.kind === 'WAREHOUSE' ? '#7651a9' : '#3182ce',
+          strokeWeight: selected ? 6 : 3,
+          strokeOpacity: selected ? 0.92 : 0.48,
+          clickable: false,
+        })
+        focusLinesRef.current.push(line)
+        if (selected) visiblePoints.push(...path)
+      }
+      if (visiblePoints.length > 1) {
+        const bounds = new window.google!.maps.LatLngBounds()
+        for (const point of visiblePoints) bounds.extend(point)
+        map.fitBounds(bounds, 48)
+      }
+      return
+    }
     if (!result?.nearestServiceLocation || !draftPoint) return
 
     const nearest = result.nearestServiceLocation
@@ -380,7 +411,7 @@ export function OperationsMap({
       })
       focusLinesRef.current.push(line)
     }
-  }, [result, draftPoint, mapReady])
+  }, [result, draftPoint, routePreview, selectedRouteId, mapReady])
 
   const serviceLocations = data?.serviceLocations.filter(
     (location) => location.latitude != null && location.longitude != null,
@@ -417,7 +448,7 @@ export function OperationsMap({
         <div className="map-legend__title">Legend</div>
         <div className="map-legend__row"><span className="map-legend__swatch map-legend__swatch--square" style={{ background: '#4b2e83' }} />Warehouse</div>
         <div className="map-legend__row"><span className="map-legend__swatch" style={{ background: '#1a5fa8' }} />Existing service location</div>
-        <div className="map-legend__row"><span className="map-legend__swatch" style={{ background: '#111827' }} />New customer</div>
+        <div className="map-legend__row"><span className="map-legend__swatch" style={{ background: '#d92d20' }} />New customer</div>
         <div className="map-legend__row"><span className="map-legend__swatch" style={{ background: '#0f7b3d' }} />Available / nearest</div>
         <div className="map-legend__row"><span className="map-legend__swatch" style={{ background: '#b4232b' }} />Not available</div>
         <div className="map-legend__row"><span className="map-legend__swatch" style={{ background: '#9a5b06' }} />Needs verification</div>

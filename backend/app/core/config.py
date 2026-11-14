@@ -71,6 +71,10 @@ class Settings(BaseSettings):
 
     # ---- Providers -----------------------------------------------------
     ROUTING_PROVIDER: str = "google_maps"
+    # Optional independent provider for display-only route previews. Keeping
+    # this separate lets preview routes use real directions without changing
+    # the provider that drives serviceability decisions.
+    ROUTE_PREVIEW_PROVIDER: str = ""
     GEOCODING_PROVIDER: str = "google_maps"
     ROUTING_FALLBACK_PROVIDER: str = ""
 
