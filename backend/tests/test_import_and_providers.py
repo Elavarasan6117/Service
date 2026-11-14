@@ -287,6 +287,165 @@ async def test_google_quota_exhaustion_is_a_rate_limit_error(monkeypatch):
     await client.aclose()
 
 
+async def test_google_routes_api_returns_matrix_distances_and_driving_geometry():
+    import httpx
+
+    from app.providers.google import GoogleMapsProvider
+
+    requests = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        if request.url.path.endswith("computeRouteMatrix"):
+            return httpx.Response(200, json=[{
+                "originIndex": 0,
+                "destinationIndex": 0,
+                "condition": "ROUTE_EXISTS",
+                "status": {},
+                "distanceMeters": 1850,
+                "duration": "420s",
+            }])
+        return httpx.Response(200, json={"routes": [{
+            "distanceMeters": 1850,
+            "duration": "420s",
+            "polyline": {"encodedPolyline": "_p~iF~ps|U_ulLnnqC_mqNvxq`@"},
+        }]})
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    provider = GoogleMapsProvider(api_key="test-secret-key", client=client)
+    origin, destination = Coordinate(13.08, 80.27), Coordinate(13.09, 80.28)
+
+    legs = await provider.get_driving_distances([origin], destination)
+    routes = await provider.get_driving_routes(origin, destination)
+
+    assert legs[0].distance_meters == 1850
+    assert legs[0].duration_seconds == 420
+    assert routes[0].distance_meters == 1850
+    assert routes[0].duration_seconds == 420
+    assert routes[0].geometry == "_p~iF~ps|U_ulLnnqC_mqNvxq`@"
+    assert requests[0].url == "https://routes.googleapis.com/distanceMatrix/v2:computeRouteMatrix"
+    assert requests[0].headers["X-Goog-FieldMask"] == (
+        "originIndex,destinationIndex,duration,distanceMeters,status,condition"
+    )
+    assert requests[1].url == "https://routes.googleapis.com/directions/v2:computeRoutes"
+    assert requests[1].headers["X-Goog-FieldMask"] == (
+        "routes.distanceMeters,routes.duration,routes.polyline.encodedPolyline"
+    )
+    assert requests[0].headers["X-Goog-Api-Key"] == "test-secret-key"
+    assert b"key=" not in requests[0].url.query
+    await client.aclose()
+
+
+async def test_google_routes_api_400_is_non_retryable(monkeypatch):
+    import httpx
+
+    from app.core.errors import RoutingProviderError
+    from app.providers.google import GoogleMapsProvider
+    from app.providers.resilience import ResilientRoutingProvider
+
+    calls = {"count": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls["count"] += 1
+        return httpx.Response(400, json={"error": {
+            "code": 400,
+            "status": "INVALID_ARGUMENT",
+            "message": "Origin and destination must be set.",
+        }})
+
+    monkeypatch.setattr("app.core.config.settings.PROVIDER_MAX_RETRIES", 3)
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    provider = ResilientRoutingProvider(GoogleMapsProvider(api_key="test-key", client=client))
+    with pytest.raises(RoutingProviderError) as error:
+        await provider.get_driving_routes(Coordinate(13.08, 80.27), Coordinate(13.09, 80.28))
+    assert error.value.code == "PROVIDER_INVALID_REQUEST"
+    assert calls["count"] == 1
+    await client.aclose()
+
+
+async def test_google_routes_api_key_error_and_quota_error_are_classified():
+    import httpx
+
+    from app.core.errors import RoutingProviderError, RoutingRateLimitError
+    from app.providers.google import GoogleMapsProvider
+
+    responses = [
+        httpx.Response(403, json={"error": {
+            "code": 403, "status": "PERMISSION_DENIED", "message": "API key not valid."
+        }}),
+        httpx.Response(429, json={"error": {
+            "code": 429, "status": "RESOURCE_EXHAUSTED", "message": "Quota exceeded."
+        }}),
+    ]
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return responses.pop(0)
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    provider = GoogleMapsProvider(api_key="test-key", client=client)
+    with pytest.raises(RoutingProviderError) as key_error:
+        await provider.get_driving_routes(Coordinate(13.08, 80.27), Coordinate(13.09, 80.28))
+    assert key_error.value.code == "PROVIDER_REQUEST_DENIED"
+    with pytest.raises(RoutingRateLimitError) as quota_error:
+        await provider.get_driving_routes(Coordinate(13.08, 80.27), Coordinate(13.09, 80.28))
+    assert quota_error.value.code == "PROVIDER_QUOTA_EXCEEDED"
+    await client.aclose()
+
+
+async def test_google_routes_provider_reports_missing_api_key():
+    from app.core.errors import RoutingProviderError
+    from app.providers.google import GoogleMapsProvider
+
+    provider = GoogleMapsProvider(api_key="")
+    with pytest.raises(RoutingProviderError) as error:
+        await provider.get_driving_routes(Coordinate(13.08, 80.27), Coordinate(13.09, 80.28))
+    assert error.value.code == "PROVIDER_NOT_CONFIGURED"
+
+
+async def test_routes_api_timeout_is_retried(monkeypatch):
+    import httpx
+
+    from app.core.errors import RoutingTimeoutError
+    from app.providers.google import GoogleMapsProvider
+    from app.providers.resilience import ResilientRoutingProvider
+
+    calls = {"count": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls["count"] += 1
+        raise httpx.ReadTimeout("timed out", request=request)
+
+    monkeypatch.setattr("app.core.config.settings.PROVIDER_MAX_RETRIES", 2)
+    monkeypatch.setattr("app.core.config.settings.PROVIDER_BACKOFF_BASE_SECONDS", 0)
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    provider = ResilientRoutingProvider(GoogleMapsProvider(api_key="test-key", client=client))
+    with pytest.raises(RoutingTimeoutError):
+        await provider.get_driving_routes(Coordinate(13.08, 80.27), Coordinate(13.09, 80.28))
+    assert calls["count"] == 2
+    await client.aclose()
+
+
+async def test_circuit_breaker_recovers_with_one_half_open_probe(monkeypatch):
+    from app.providers.resilience import CircuitBreaker
+
+    breaker = CircuitBreaker("test-provider", fail_threshold=1, reset_seconds=0)
+    await breaker.before_call()
+    await breaker.on_failure()
+    assert breaker.state == breaker.HALF_OPEN
+
+    await breaker.before_call()
+    with pytest.raises(Exception, match="checking recovery"):
+        await breaker.before_call()
+    await breaker.on_success()
+    assert breaker.state == breaker.CLOSED
+
+    await breaker.before_call()
+    await breaker.on_failure()
+    await breaker.before_call()
+    await breaker.on_non_retryable_failure()
+    assert breaker.state == breaker.CLOSED
+
+
 async def test_resilient_wrapper_retries_then_raises(monkeypatch):
     from app.providers.resilience import ResilientRoutingProvider
 

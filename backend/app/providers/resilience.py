@@ -62,6 +62,7 @@ class CircuitBreaker:
         self._failures = 0
         self._opened_at: float | None = None
         self._lock = asyncio.Lock()
+        self._half_open_probe = False
 
     @property
     def state(self) -> int:
@@ -72,21 +73,49 @@ class CircuitBreaker:
         return self.OPEN
 
     async def before_call(self) -> None:
-        state = self.state
+        async with self._lock:
+            state = self.state
+            if state == self.HALF_OPEN:
+                if self._half_open_probe:
+                    provider_circuit_state.labels(provider=self.name).set(state)
+                    raise CircuitOpenError(
+                        "Routing is checking recovery after a temporary outage. Please retry shortly."
+                    )
+                self._half_open_probe = True
         provider_circuit_state.labels(provider=self.name).set(state)
         if state == self.OPEN:
             raise CircuitOpenError()
 
     async def on_success(self) -> None:
         async with self._lock:
+            was_open = self._opened_at is not None
             self._failures = 0
             self._opened_at = None
+            self._half_open_probe = False
+        if was_open:
+            logger.info("circuit_recovered", provider=self.name)
         provider_circuit_state.labels(provider=self.name).set(self.CLOSED)
+
+    async def on_non_retryable_failure(self) -> None:
+        """Release a half-open probe on a permanent request/config error."""
+        async with self._lock:
+            was_half_open = self._opened_at is not None and self.state == self.HALF_OPEN
+            self._half_open_probe = False
+            if was_half_open:
+                # Bad credentials or malformed requests are not provider
+                # outages. Stop gating on the old transient outage window.
+                self._failures = 0
+                self._opened_at = None
+        if was_half_open:
+            logger.info("circuit_probe_rejected_non_retryable", provider=self.name)
+            provider_circuit_state.labels(provider=self.name).set(self.CLOSED)
 
     async def on_failure(self) -> None:
         async with self._lock:
+            was_half_open = self._opened_at is not None
+            self._half_open_probe = False
             self._failures += 1
-            if self._failures >= self.fail_threshold:
+            if was_half_open or self._failures >= self.fail_threshold:
                 self._opened_at = time.monotonic()
                 logger.error(
                     "circuit_opened",
@@ -139,7 +168,9 @@ async def _call_with_retry(
             retryable = exc.code not in (
                 "PROVIDER_NOT_CONFIGURED",
                 "PROVIDER_REQUEST_DENIED",
+                "PROVIDER_UNAUTHENTICATED",
                 "PROVIDER_INVALID_REQUEST",
+                "PROVIDER_CLIENT_ERROR",
                 "PROVIDER_NO_ROUTE",
             )
         else:
@@ -160,6 +191,16 @@ async def _call_with_retry(
         provider_requests_total.labels(
             provider=provider, operation=operation, outcome=outcome
         ).inc()
+        logger.warning(
+            "provider_attempt_failed",
+            provider=provider,
+            operation=operation,
+            attempt=attempt,
+            max_attempts=attempts,
+            outcome=outcome,
+            duration_ms=round(elapsed * 1000),
+            error_code=getattr(last_error, "code", type(last_error).__name__),
+        )
 
         if not retryable or attempt == attempts:
             break
@@ -175,11 +216,17 @@ async def _call_with_retry(
             attempt=attempt,
             max_attempts=attempts,
             delay_seconds=round(delay, 3),
-            error=str(last_error),
+            error_code=getattr(last_error, "code", type(last_error).__name__),
         )
         await asyncio.sleep(delay)
 
-    await breaker.on_failure()
+    # Permanent request/configuration failures should be returned immediately,
+    # but they are not evidence that the upstream is unhealthy and must not
+    # trip the circuit. Only transient failures count toward opening it.
+    if retryable:
+        await breaker.on_failure()
+    else:
+        await breaker.on_non_retryable_failure()
     assert last_error is not None
     raise last_error
 

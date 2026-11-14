@@ -211,16 +211,26 @@ def _route_provider_failure(exc: ProviderError) -> tuple[str, str]:
             "ROUTING_API_KEY_MISSING",
             "The server-side GOOGLE_MAPS_API_KEY is missing. Configure it in Render.",
         )
+    if code == "PROVIDER_UNAUTHENTICATED":
+        return "ROUTING_API_KEY_INVALID", "Google rejected the server API key. Check that it is valid and configured for server use."
     if "billing" in lowered or "billingnotenabled" in lowered:
         return "BILLING_OR_PERMISSION_ERROR", "Google Maps billing is not enabled for routing."
-    if code == "PROVIDER_REQUEST_DENIED" and any(
-        phrase in lowered for phrase in ("not enabled", "api project", "accessnotconfigured")
-    ):
-        return "ROUTING_API_NOT_ENABLED", "Enable the Google Directions API for the server key."
-    if code in ("PROVIDER_REQUEST_DENIED", "PROVIDER_INVALID_REQUEST"):
-        return "BILLING_OR_PERMISSION_ERROR", "Google rejected the route request. Check server-key API restrictions and billing."
+    if code == "PROVIDER_REQUEST_DENIED":
+        if any(phrase in lowered for phrase in ("not enabled", "api project", "accessnotconfigured", "routes api")):
+            return "ROUTING_API_NOT_ENABLED", "Enable Google Routes API for this project and allow it on the server API key."
+        if any(phrase in lowered for phrase in ("api key not valid", "invalid api key", "api key is invalid")):
+            return "ROUTING_API_KEY_INVALID", "Google rejected the server API key. Check that the key is valid and configured for server use."
+        if any(phrase in lowered for phrase in ("ip address", "referer", "application restriction", "restricted")):
+            return "ROUTING_API_KEY_RESTRICTED", "Google rejected the server key restriction. Check its application restrictions for Render server requests."
+        return "BILLING_OR_PERMISSION_ERROR", "Google denied route access. Check billing, Routes API enablement, and server-key restrictions."
+    if code == "PROVIDER_INVALID_REQUEST":
+        return "ROUTING_INVALID_REQUEST", "Google rejected the route coordinates or request fields. Check the server routing diagnostics."
     if code in ("PROVIDER_QUOTA_EXCEEDED", "ROUTING_RATE_LIMITED"):
-        return "ROUTE_SERVICE_UNAVAILABLE", "Google Maps routing quota is unavailable. Check its quota and billing."
+        return "ROUTE_SERVICE_UNAVAILABLE", "Google Routes API quota or rate limit was reached. Check quota and billing, then retry."
+    if code == "ROUTING_CIRCUIT_OPEN":
+        return "ROUTE_SERVICE_UNAVAILABLE", message
+    if code == "ROUTING_TIMEOUT":
+        return "ROUTE_SERVICE_UNAVAILABLE", "Google Routes API timed out. Please retry."
     return "ROUTE_UNAVAILABLE", "The routing service is temporarily unavailable. Please retry."
 
 

@@ -3,8 +3,9 @@
 APIs used, all server-side:
   * Geocoding API          — address → coordinates
   * Places Autocomplete    — address search suggestions
-  * Distance Matrix API    — road distance, 1 origin × N destinations, one call
-  * Directions API         — road route with geometry for the winning pair
+  * Routes API             — computeRouteMatrix road ranking and computeRoutes
+                             distance, duration, alternatives and geometry
+  * Distance Matrix API    — retained for existing serviceability routing
 
 The API key is read from settings and never leaves the backend. The browser
 receives only the results of these calls.
@@ -12,6 +13,9 @@ receives only the results of these calls.
 
 from __future__ import annotations
 
+import json
+import re
+import time
 from typing import Any
 from urllib.parse import quote
 
@@ -38,11 +42,46 @@ logger = get_logger(__name__)
 _BASE = "https://maps.googleapis.com/maps/api"
 _GEOCODING_V4 = "https://geocode.googleapis.com/v4/geocode"
 _PLACES_V1 = "https://places.googleapis.com/v1"
+_ROUTES_V2 = "https://routes.googleapis.com"
 
 # Google's Distance Matrix limit is 25 destinations per request (and 100
 # elements). We chunk to stay inside it; CANDIDATE_MAX_COUNT is normally well
 # below this, so chunking is a safety net rather than the usual path.
 _MAX_DESTINATIONS_PER_REQUEST = 25
+
+
+def _lat_lng(point: Coordinate) -> dict[str, float]:
+    # Coordinate validates the API's numeric bounds in __post_init__.
+    return {"latitude": float(point.latitude), "longitude": float(point.longitude)}
+
+
+def _duration_seconds(value: Any) -> int | None:
+    if not isinstance(value, str):
+        return None
+    match = re.fullmatch(r"(\d+(?:\.\d+)?)s", value)
+    return int(round(float(match.group(1)))) if match else None
+
+
+def _safe_google_error_body(response: httpx.Response, payload: Any) -> str:
+    """Keep useful Google diagnostics while never logging credential fields."""
+    def redact(value: Any) -> Any:
+        if isinstance(value, dict):
+            return {
+                key: ("[redacted]" if re.search(r"key|token|credential|secret", key, re.I) else redact(item))
+                for key, item in value.items()
+            }
+        if isinstance(value, list):
+            return [redact(item) for item in value]
+        if isinstance(value, str):
+            value = re.sub(r"AIza[0-9A-Za-z_-]{20,}", "[redacted]", value)
+            return re.sub(r"(?i)([?&](?:key|token|access_token)=)[^&\s]+", r"\1[redacted]", value)
+        return value
+
+    if isinstance(payload, dict):
+        body: Any = payload.get("error", payload)
+    else:
+        body = response.text[:1000]
+    return json.dumps(redact(body), ensure_ascii=True, default=str)[:1500]
 
 class GoogleMapsProvider:
     """Implements both RoutingProvider and GeocodingProvider."""
@@ -77,15 +116,33 @@ class GoogleMapsProvider:
 
     async def _get(self, path: str, params: dict[str, Any]) -> dict[str, Any]:
         if not self.api_key:
+            logger.error("google_maps_request_not_configured", operation=path.strip("/"), api_key_configured=False)
             raise RoutingProviderError(
                 "GOOGLE_MAPS_API_KEY is not configured.",
                 code="PROVIDER_NOT_CONFIGURED",
             )
         params = {**params, "key": self.api_key}
+        started = time.perf_counter()
         response = await self.client.get(f"{_BASE}{path}", params=params)
+        elapsed_ms = round((time.perf_counter() - started) * 1000)
+        try:
+            diagnostic_payload = response.json()
+        except ValueError:
+            diagnostic_payload = None
+        error = diagnostic_payload.get("error", {}) if isinstance(diagnostic_payload, dict) else {}
+        status_value = diagnostic_payload.get("status") if isinstance(diagnostic_payload, dict) else None
+        logger.info(
+            "google_maps_request",
+            operation=path.strip("/"),
+            http_status=response.status_code,
+            error_code=error.get("status") or status_value or error.get("code"),
+            duration_ms=elapsed_ms,
+            api_key_configured=True,
+            response_body=_safe_google_error_body(response, diagnostic_payload) if response.is_error or status_value not in (None, "OK") else None,
+        )
 
         if response.status_code == 429:
-            raise RoutingRateLimitError()
+            raise RoutingRateLimitError(code="PROVIDER_QUOTA_EXCEEDED")
         if response.status_code >= 500:
             raise RoutingProviderError(
                 f"Google returned HTTP {response.status_code}.",
@@ -105,7 +162,11 @@ class GoogleMapsProvider:
             raise RoutingProviderError(
                 f"Google Maps request failed: {status_value} "
                 f"{payload.get('error_message', '')}".strip(),
-                code=f"PROVIDER_{status_value}",
+                code={
+                    "REQUEST_DENIED": "PROVIDER_REQUEST_DENIED",
+                    "INVALID_REQUEST": "PROVIDER_INVALID_REQUEST",
+                    "UNKNOWN_ERROR": "PROVIDER_HTTP_5XX",
+                }[status_value],
             )
         return payload
 
@@ -117,8 +178,9 @@ class GoogleMapsProvider:
         params: dict[str, Any] | None = None,
         body: dict[str, Any] | None = None,
         field_mask: str | None = None,
-    ) -> dict[str, Any]:
+    ) -> Any:
         if not self.api_key:
+            logger.error("google_maps_request_not_configured", operation=url.rsplit("/", 1)[-1], api_key_configured=False)
             raise RoutingProviderError(
                 "GOOGLE_MAPS_API_KEY is not configured.",
                 code="PROVIDER_NOT_CONFIGURED",
@@ -128,31 +190,73 @@ class GoogleMapsProvider:
             headers["Content-Type"] = "application/json"
         if field_mask:
             headers["X-Goog-FieldMask"] = field_mask
-        response = await self.client.request(
-            method, url, params=params, json=body, headers=headers
+        started = time.perf_counter()
+        try:
+            response = await self.client.request(
+                method, url, params=params, json=body, headers=headers
+            )
+        except httpx.HTTPError as exc:
+            logger.warning(
+                "google_maps_request_failed",
+                operation=url.rsplit("/", 1)[-1],
+                duration_ms=round((time.perf_counter() - started) * 1000),
+                error_type=type(exc).__name__,
+                api_key_configured=True,
+            )
+            raise
+
+        elapsed_ms = round((time.perf_counter() - started) * 1000)
+        try:
+            payload = response.json()
+        except ValueError:
+            payload = None
+        error = payload.get("error", {}) if isinstance(payload, dict) else {}
+        matrix_errors = (
+            [element.get("status", {}) for element in payload
+             if isinstance(element, dict) and element.get("status", {}).get("code", 0)]
+            if isinstance(payload, list) else []
         )
-        if response.status_code == 429:
-            raise RoutingRateLimitError()
+        api_error_code = error.get("status") or error.get("code") or (
+            [item.get("code") for item in matrix_errors] or None
+        )
+        has_api_error = response.is_error or bool(matrix_errors)
+        response_body = _safe_google_error_body(response, payload) if has_api_error else None
+        logger.info(
+            "google_maps_request",
+            operation=url.rsplit("/", 1)[-1],
+            http_status=response.status_code,
+            error_code=api_error_code,
+            duration_ms=elapsed_ms,
+            api_key_configured=True,
+            response_body=response_body,
+        )
+
+        if response.status_code == 429 or api_error_code in ("RESOURCE_EXHAUSTED", "RATE_LIMIT_EXCEEDED") or (
+            isinstance(api_error_code, list) and 8 in api_error_code
+        ):
+            raise RoutingRateLimitError(
+                "Google Routes API quota or rate limit was reached.",
+                code="PROVIDER_QUOTA_EXCEEDED",
+            )
         if response.status_code >= 500:
             raise RoutingProviderError(
-                f"Google returned HTTP {response.status_code}.",
+                f"Google Maps returned HTTP {response.status_code} ({api_error_code or 'upstream error'}).",
                 code="PROVIDER_HTTP_5XX",
             )
         if response.status_code >= 400:
-            try:
-                error_body = response.json().get("error", {})
-            except (ValueError, AttributeError):
-                error_body = {}
-            if response.status_code == 404 or error_body.get("status") == "NOT_FOUND":
+            if response.status_code == 404 and ("geocode" in url or "places" in url):
                 raise GeocodingNoResultError("Google could not find that address.")
-            message = error_body.get("message") or (
-                f"Google Maps request failed with HTTP {response.status_code}."
-            )
-            raise RoutingProviderError(
-                str(message),
-                code="PROVIDER_REQUEST_FAILED",
-            )
-        return response.json()
+            safe_message = str(error.get("message") or f"Google Maps returned HTTP {response.status_code}.")
+            if response.status_code == 401:
+                code = "PROVIDER_UNAUTHENTICATED"
+            elif response.status_code == 403:
+                code = "PROVIDER_REQUEST_DENIED"
+            elif response.status_code == 400:
+                code = "PROVIDER_INVALID_REQUEST"
+            else:
+                code = "PROVIDER_CLIENT_ERROR"
+            raise RoutingProviderError(safe_message[:500], code=code)
+        return payload
 
     # -- routing ---------------------------------------------------------
 
@@ -171,41 +275,74 @@ class GoogleMapsProvider:
     async def get_driving_distances(
         self, origins: list[Coordinate], destination: Coordinate
     ) -> list[RouteLeg | None]:
-        """Road distances in the requested direction from many origins to one point."""
-        results: list[RouteLeg | None] = []
-        for start in range(0, len(origins), _MAX_DESTINATIONS_PER_REQUEST):
-            chunk = origins[start : start + _MAX_DESTINATIONS_PER_REQUEST]
-            payload = await self._get(
-                "/distancematrix/json",
-                {
-                    "origins": "|".join(str(origin) for origin in chunk),
-                    "destinations": str(destination),
-                    "mode": "driving",
-                    "units": "metric",
-                    "region": settings.GOOGLE_MAPS_REGION,
-                    "language": settings.GOOGLE_MAPS_LANGUAGE,
-                },
+        """Road distances for the preview shortlist using Routes API matrix."""
+        if not origins:
+            return []
+        payload = await self._request_json(
+            "POST",
+            f"{_ROUTES_V2}/distanceMatrix/v2:computeRouteMatrix",
+            body={
+                "origins": [
+                    {"waypoint": {"location": {"latLng": _lat_lng(origin)}}}
+                    for origin in origins
+                ],
+                "destinations": [
+                    {"waypoint": {"location": {"latLng": _lat_lng(destination)}}}
+                ],
+                "travelMode": "DRIVE",
+                "routingPreference": "TRAFFIC_UNAWARE",
+            },
+            field_mask="originIndex,destinationIndex,duration,distanceMeters,status,condition",
+        )
+        if not isinstance(payload, list):
+            raise RoutingProviderError(
+                "Google Routes API returned an invalid route matrix response.",
+                code="PROVIDER_INVALID_RESPONSE",
             )
-            rows = payload.get("rows") or []
-            if len(rows) != len(chunk):
-                raise RoutingProviderError(
-                    "Distance Matrix returned a mismatched number of origin rows.",
-                    code="PROVIDER_RESPONSE_MISALIGNED",
-                )
-            for row in rows:
-                elements = row.get("elements") or []
-                if len(elements) != 1 or elements[0].get("status") != "OK":
-                    results.append(None)
-                    continue
-                element = elements[0]
-                distance = element.get("distance", {}).get("value")
-                duration = element.get("duration", {}).get("value")
-                results.append(RouteLeg(
-                    distance_meters=int(round(float(distance))),
-                    duration_seconds=int(duration) if duration is not None else None,
-                    distance_type=DistanceType.ROAD_DISTANCE,
-                    provider=self.name,
-                ) if distance is not None else None)
+        results: list[RouteLeg | None] = [None] * len(origins)
+        for element in payload:
+            if not isinstance(element, dict):
+                continue
+            origin_index = element.get("originIndex")
+            if not isinstance(origin_index, int) or not 0 <= origin_index < len(origins):
+                continue
+            element_status = element.get("status", {})
+            status_code = element_status.get("code", 0)
+            if status_code:
+                error_name = element_status.get("status")
+                if status_code == 3:
+                    raise RoutingProviderError(
+                        str(element_status.get("message") or "Google rejected a route matrix coordinate."),
+                        code="PROVIDER_INVALID_REQUEST",
+                    )
+                if status_code in (7, 16):
+                    raise RoutingProviderError(
+                        str(element_status.get("message") or "Google denied Routes API access."),
+                        code="PROVIDER_REQUEST_DENIED" if status_code == 7 else "PROVIDER_UNAUTHENTICATED",
+                    )
+                if status_code == 8:
+                    raise RoutingRateLimitError(
+                        str(element_status.get("message") or "Google Routes API quota was exceeded."),
+                        code="PROVIDER_QUOTA_EXCEEDED",
+                    )
+                if status_code == 14:
+                    raise RoutingProviderError(
+                        str(element_status.get("message") or "Google Routes API is unavailable."),
+                        code="PROVIDER_HTTP_5XX",
+                    )
+                logger.warning("google_routes_matrix_element_unavailable", status=error_name, status_code=status_code)
+                continue
+            if element.get("condition") != "ROUTE_EXISTS":
+                continue
+            distance = element.get("distanceMeters")
+            if distance is None:
+                continue
+            results[origin_index] = RouteLeg(
+                distance_meters=int(distance),
+                duration_seconds=_duration_seconds(element.get("duration")),
+                distance_type=DistanceType.ROAD_DISTANCE,
+                provider=self.name,
+            )
         return results
 
     async def _distance_matrix_chunk(
@@ -268,19 +405,24 @@ class GoogleMapsProvider:
     async def get_driving_routes(
         self, origin: Coordinate, destination: Coordinate
     ) -> list[RouteDetail]:
-        payload = await self._get(
-            "/directions/json",
-            {
-                "origin": str(origin),
-                "destination": str(destination),
-                "mode": "driving",
-                "alternatives": "true",
-                "units": "metric",
-                "region": settings.GOOGLE_MAPS_REGION,
-                "language": settings.GOOGLE_MAPS_LANGUAGE,
+        payload = await self._request_json(
+            "POST",
+            f"{_ROUTES_V2}/directions/v2:computeRoutes",
+            body={
+                "origin": {"location": {"latLng": _lat_lng(origin)}},
+                "destination": {"location": {"latLng": _lat_lng(destination)}},
+                "travelMode": "DRIVE",
+                "routingPreference": "TRAFFIC_UNAWARE",
+                "computeAlternativeRoutes": True,
+                "polylineQuality": "OVERVIEW",
+                "polylineEncoding": "ENCODED_POLYLINE",
+                "units": "METRIC",
+                "languageCode": settings.GOOGLE_MAPS_LANGUAGE,
+                **({"regionCode": settings.GOOGLE_MAPS_REGION.upper()} if settings.GOOGLE_MAPS_REGION else {}),
             },
+            field_mask="routes.distanceMeters,routes.duration,routes.polyline.encodedPolyline",
         )
-        routes = payload.get("routes") or []
+        routes = payload.get("routes") or [] if isinstance(payload, dict) else []
         if not routes:
             raise RoutingProviderError(
                 "No driving route found between these points.",
@@ -288,13 +430,12 @@ class GoogleMapsProvider:
             )
         details = []
         for route in routes:
-            legs = route.get("legs") or []
-            distance = sum(leg.get("distance", {}).get("value", 0) for leg in legs)
-            duration = sum(leg.get("duration", {}).get("value", 0) for leg in legs)
-            geometry = (route.get("overview_polyline") or {}).get("points")
+            distance = route.get("distanceMeters", 0)
+            duration = _duration_seconds(route.get("duration"))
+            geometry = (route.get("polyline") or {}).get("encodedPolyline")
             details.append(RouteDetail(
                 distance_meters=int(round(float(distance))),
-                duration_seconds=int(duration) if duration else None,
+                duration_seconds=duration,
                 geometry=geometry,
                 geometry_format="encoded_polyline_5" if geometry else "none",
                 provider=self.name,

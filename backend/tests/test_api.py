@@ -50,6 +50,16 @@ async def test_route_preview_requires_authentication(client):
     assert response.status_code == 401
 
 
+async def test_route_preview_rejects_out_of_range_coordinates(client, ops_user):
+    response = await client.post(
+        "/api/v1/routes/preview",
+        headers=auth_headers(ops_user),
+        json={"latitude": 95, "longitude": 80.27},
+    )
+    assert response.status_code == 422
+    assert "latitude" in response.text.lower()
+
+
 async def test_route_preview_uses_active_warehouse_and_returns_road_route(
     client, ops_user, warehouse, monkeypatch
 ):
