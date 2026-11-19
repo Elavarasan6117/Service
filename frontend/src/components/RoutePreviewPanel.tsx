@@ -13,16 +13,13 @@ const statusText: Record<string, string> = {
   CALCULATED_UNVERIFIED: 'Calculated · four-wheeler access unverified',
   ROUTE_GEOMETRY_UNAVAILABLE: 'Road distance calculated, but route geometry is unavailable to draw',
   REAL_ROUTING_PROVIDER_REQUIRED: 'A real routing provider is required; fake routing cannot supply road geometry',
+  ROUTING_PROVIDER_NOT_CONFIGURED: 'Configure the server OSRM endpoint before calculating routes',
+  ROUTING_INVALID_REQUEST: 'The routing service rejected the coordinates or request',
+  ROUTING_INVALID_RESPONSE: 'The routing service returned an invalid response',
   NO_NEARBY_LOCATION: 'No nearby active location found',
   MISSING_COORDINATES: 'Existing customer records need valid latitude and longitude',
   NO_DRIVING_ROUTE: 'No driving route is available',
-  ROUTING_API_KEY_MISSING: 'Server-side Google Maps API key is missing',
-  ROUTING_API_NOT_ENABLED: 'Enable Routes API for the server-side Google key',
-  ROUTING_API_KEY_INVALID: 'Google rejected the server API key',
-  ROUTING_API_KEY_RESTRICTED: 'Google rejected the server API key restriction',
-  ROUTING_INVALID_REQUEST: 'Google rejected route coordinates or request fields',
-  BILLING_OR_PERMISSION_ERROR: 'Google Maps billing or server-key permissions need attention',
-  ROUTE_SERVICE_UNAVAILABLE: 'Google Maps routing quota or service is unavailable',
+  ROUTE_SERVICE_UNAVAILABLE: 'OSRM is temporarily unavailable. Please retry.',
   ROUTE_UNAVAILABLE: 'Route service is temporarily unavailable',
 }
 
@@ -61,7 +58,7 @@ export function RoutePreviewPanel({ result, loading, error, searchRadiusKm, onSe
       {result && <>
         <div className="route-preview__legend" aria-label="Route colours">
           <span><i className="route-preview__swatch route-preview__swatch--warehouse" />Blue · Nearest Warehouse → New Customer</span>
-          <span><i className="route-preview__swatch route-preview__swatch--customer" />Red · Existing Customer → New Customer</span>
+          <span><i className="route-preview__swatch route-preview__swatch--customer" />Pink · Existing Customer → New Customer</span>
         </div>
         <div className="route-preview__routes">
           <RouteCard
@@ -86,6 +83,11 @@ export function RoutePreviewPanel({ result, loading, error, searchRadiusKm, onSe
             ? <><span>{comparison.shorter}</span><span>{comparison.quicker}</span></>
             : <span>Route comparison is unavailable until both road routes are calculated.</span>}
         </div>
+        <p className="route-preview__attribution">
+          Road routes: <a href="https://project-osrm.org/" target="_blank" rel="noreferrer">OSRM</a>
+          {' · Map data © '}
+          <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noreferrer">OpenStreetMap contributors</a>
+        </p>
       </>}
     </section>
   )

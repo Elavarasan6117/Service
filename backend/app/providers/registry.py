@@ -91,18 +91,13 @@ def get_routing_provider() -> ResilientRoutingProvider:
 
 
 def get_route_preview_provider() -> ResilientRoutingProvider:
-    """Use a real road router for previews when the demo router is configured."""
+    """Select the dedicated road router for temporary map route previews."""
     global _route_preview
     configured = settings.ROUTE_PREVIEW_PROVIDER.strip().lower()
     routing_key = settings.ROUTING_PROVIDER.strip().lower()
-    # The hosted demo intentionally keeps synthetic serviceability results.
-    # Route previews must still use actual road geometry when the server key is
-    # available, even if Render has not synced the optional preview setting yet.
-    key = configured or (
-        "google_maps"
-        if routing_key == "fake" and settings.GOOGLE_MAPS_API_KEY
-        else routing_key
-    )
+    # Preview routing is configured independently so replacing OSRM preview
+    # traffic never changes serviceability calculations or Google geocoding.
+    key = configured or ("osrm" if routing_key == "fake" else routing_key)
     if key == routing_key:
         return get_routing_provider()
     if _route_preview is None:

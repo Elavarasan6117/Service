@@ -6,7 +6,10 @@ from decimal import Decimal
 
 import pytest
 
+from app.core.enums import EntityStatus
+from app.models.customer import Customer
 from app.models.service_location import ServiceLocation
+from app.models.warehouse import Warehouse
 from app.providers.base import RouteDetail, RouteLeg
 from app.core.errors import RoutingProviderError
 from app.api.v1.map_dashboard import _route_provider_failure
@@ -78,21 +81,21 @@ async def test_route_preview_rejects_out_of_range_coordinates(client, ops_user):
     assert "latitude" in response.text.lower()
 
 
-def test_route_preview_error_preserves_safe_google_detail():
-    fake_key = "AIza" + "A" * 35
+def test_route_preview_error_preserves_safe_provider_detail():
+    secret = "private-route-token-value"
     status_code, message = _route_provider_failure(RoutingProviderError(
-        f"API key not valid: {fake_key}", code="PROVIDER_REQUEST_DENIED"
+        f"OSRM upstream failed while using Bearer {secret}", code="PROVIDER_HTTP_5XX"
     ))
-    assert status_code == "ROUTING_API_KEY_INVALID"
-    assert "API key not valid" in message
-    assert fake_key not in message
+    assert status_code == "ROUTE_UNAVAILABLE"
+    assert "OSRM upstream failed" in message
+    assert secret not in message
 
 
 async def test_route_preview_uses_active_warehouse_and_returns_road_route(
     client, ops_user, warehouse, monkeypatch
 ):
     class StubRoadProvider:
-        name = "google_maps"
+        name = "osrm"
 
         async def get_driving_distances(self, origins, destination):
             return [RouteLeg(4200, 720, provider=self.name) for _ in origins]
@@ -125,6 +128,79 @@ async def test_route_preview_uses_active_warehouse_and_returns_road_route(
     assert body["routes"][0]["geometry"] == "_p~iF~ps|U_ulLnnqC_mqNvxq`@"
     assert body["warehouseRouteStatus"] == "CALCULATED_UNVERIFIED"
     assert body["customerRouteStatus"] == "NO_NEARBY_LOCATION"
+
+
+async def test_route_preview_selects_road_nearest_eligible_origins_and_skips_unreachable(
+    client, ops_user, warehouse, session, monkeypatch
+):
+    closer_by_road = Warehouse(
+        warehouse_code="WH-TEST-02",
+        warehouse_name="Road-nearest Warehouse",
+        latitude=Decimal("13.0790000"),
+        longitude=Decimal("80.2690000"),
+        status=EntityStatus.ACTIVE,
+    )
+    customers = [
+        Customer(
+            customer_code=f"C-ROUTE-{index}", customer_name=f"Route Customer {index}",
+            address="Test Road, Chennai", city="Chennai",
+            latitude=Decimal(latitude), longitude=Decimal(longitude),
+        )
+        for index, (latitude, longitude) in enumerate(
+            (("13.0200000", "80.2200000"), ("13.0795000", "80.2680000"), ("13.0700000", "80.2500000")),
+            start=1,
+        )
+    ]
+    session.add_all([closer_by_road, *customers])
+    await session.commit()
+
+    road_meters = {
+        (13.01, 80.22): 2400,
+        (13.079, 80.269): 8800,
+        (13.02, 80.22): 1300,
+        (13.0795, 80.268): 1900,
+        (13.07, 80.25): None,
+    }
+
+    def distance_for(point):
+        return road_meters.get((round(point.latitude, 4), round(point.longitude, 4)))
+
+    class StubRoadProvider:
+        name = "osrm"
+
+        async def get_driving_distances(self, origins, destination):
+            return [
+                None if (meters := distance_for(point)) is None
+                else RouteLeg(meters, 480, provider=self.name)
+                for point in origins
+            ]
+
+        async def get_driving_routes(self, origin, destination):
+            meters = distance_for(origin)
+            assert meters is not None
+            return [RouteDetail(
+                distance_meters=meters, duration_seconds=480,
+                geometry="_p~iF~ps|U_ulLnnqC_mqNvxq`@",
+                geometry_format="encoded_polyline_5", provider=self.name,
+            )]
+
+    monkeypatch.setattr(
+        "app.api.v1.map_dashboard.get_route_preview_provider",
+        lambda: StubRoadProvider(),
+    )
+    response = await client.post(
+        "/api/v1/routes/preview",
+        headers=auth_headers(ops_user),
+        json={"latitude": 13.08, "longitude": 80.27, "searchRadiusKm": 25},
+    )
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["nearestWarehouse"]["id"] == str(warehouse.id)
+    assert body["nearestWarehouse"]["distanceMeters"] == 2400
+    assert body["nearestCustomer"]["id"] == str(customers[0].id)
+    assert body["nearestCustomer"]["distanceMeters"] == 1300
+    assert {route["origin"]["kind"] for route in body["routes"]} == {"WAREHOUSE", "CUSTOMER"}
+    assert all(route["provider"] == "osrm" for route in body["routes"])
 
 
 async def test_login_succeeds_and_returns_tokens(client, ops_user):
@@ -304,7 +380,8 @@ async def test_create_customer_rejects_blank_or_whitespace_name(
         headers=auth_headers(ops_user),
         json={"customerName": customer_name, "address": "45 Test Road, Chennai"},
     )
-    assert response.status_code == 422
+    # Shared request-validation errors use the application's 400 envelope.
+    assert response.status_code == 400
     details = response.json()["error"]["details"]
     assert any(
         detail.get("field") == "customerName"

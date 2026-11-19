@@ -395,6 +395,7 @@ button, input, select, textarea { font: inherit; color: inherit; }
 .route-preview__swatch--customer { background: #e11d48; }
 .route-preview__routes { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 9px; }
 .route-preview__comparison { display: flex; flex-wrap: wrap; gap: 8px 20px; padding-top: 11px; color: #344054; font-size: .83rem; }
+.route-preview__attribution { margin: 8px 0 0; color: #667085; font-size: .7rem; }
 .route-preview__route { min-width: 0; padding: 11px; border: 1px solid #d0d5dd; border-left: 4px solid #2563eb; border-radius: 9px; background: #fff; color: #344054; }
 .route-preview__route--customer { border-left-color: #e11d48; }
 .route-preview__route h4 { margin: 0 0 8px; font-size: .9rem; color: #101828; }

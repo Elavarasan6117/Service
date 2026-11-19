@@ -211,6 +211,25 @@ def test_osrm_uses_lon_lat_order():
     assert coords == "80.2707,13.0827"
 
 
+def test_route_preview_can_use_osrm_without_changing_google_serviceability_provider(monkeypatch):
+    from app.core.config import settings
+    from app.providers.osrm import OsrmProvider
+    from app.providers.registry import get_route_preview_provider
+    import app.providers.registry as registry
+
+    monkeypatch.setattr(settings, "ROUTE_PREVIEW_PROVIDER", "osrm")
+    monkeypatch.setattr(settings, "ROUTING_PROVIDER", "google_maps")
+    monkeypatch.setattr(registry, "_route_preview", None)
+    monkeypatch.setattr(registry, "_routing", None)
+
+    preview_provider = get_route_preview_provider()
+    assert isinstance(preview_provider.inner, OsrmProvider)
+    assert settings.ROUTING_PROVIDER == "google_maps"
+    assert registry._routing is None
+
+    registry._route_preview = None
+
+
 async def test_google_adapter_parses_distance_matrix(monkeypatch):
     from app.providers.google import GoogleMapsProvider
 
@@ -245,6 +264,60 @@ async def test_google_adapter_parses_distance_matrix(monkeypatch):
     assert isinstance(legs[0].distance_meters, int)
     assert legs[0].distance_type.value == "ROAD_DISTANCE"
     assert legs[1] is None, "ZERO_RESULTS for one pair is not a provider failure."
+
+
+async def test_osrm_batches_origin_table_caches_and_returns_encoded_route():
+    import asyncio
+    import httpx
+
+    from app.providers.osrm import OsrmProvider
+
+    requests = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        if "/table/" in request.url.path:
+            return httpx.Response(200, json={
+                "code": "Ok",
+                "distances": [[3400], [None]],
+                "durations": [[480], [None]],
+            })
+        return httpx.Response(200, json={"code": "Ok", "routes": [{
+            "distance": 3400,
+            "duration": 480,
+            "geometry": "_p~iF~ps|U_ulLnnqC_mqNvxq`@",
+        }]})
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    provider = OsrmProvider(base_url="http://osrm.internal", client=client)
+    origins = [Coordinate(13.01, 80.22), Coordinate(13.02, 80.23)]
+    destination = Coordinate(13.08, 80.27)
+
+    first, duplicate = await asyncio.gather(
+        provider.get_driving_distances(origins, destination),
+        provider.get_driving_distances(origins, destination),
+    )
+    assert [leg.distance_meters if leg else None for leg in first] == [3400, None]
+    assert [leg.duration_seconds if leg else None for leg in first] == [480, None]
+    assert [leg.distance_meters if leg else None for leg in duplicate] == [3400, None]
+    assert len(requests) == 1, "Concurrent duplicate matrix calls should share one OSRM request."
+    assert requests[0].url.path.endswith(
+        "/table/v1/driving/80.22,13.01;80.23,13.02;80.27,13.08"
+    )
+    assert requests[0].url.params["sources"] == "0;1"
+    assert requests[0].url.params["destinations"] == "2"
+    await provider.get_driving_distances(origins, destination)
+    assert len(requests) == 1, "Recent matching table responses should be cached."
+
+    route = await provider.get_driving_route(origins[0], destination)
+    assert route.distance_meters == 3400
+    assert route.duration_seconds == 480
+    assert route.geometry == "_p~iF~ps|U_ulLnnqC_mqNvxq`@"
+    assert route.geometry_format == "encoded_polyline_5"
+    assert len(requests) == 2
+    assert requests[1].url.params["overview"] == "full"
+    assert requests[1].url.params["geometries"] == "polyline"
+    await client.aclose()
 
 
 async def test_google_adapter_raises_on_misaligned_response(monkeypatch):

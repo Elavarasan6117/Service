@@ -56,10 +56,14 @@ Edit `.env` and set, at minimum:
 | `POSTGRES_PASSWORD` | the generated password |
 | `GOOGLE_MAPS_API_KEY` | the restricted production key |
 | `VITE_GOOGLE_MAPS_API_KEY` | browser key restricted to the deployed hostname and Maps JavaScript API |
+| `ROUTE_PREVIEW_PROVIDER` | `osrm` |
+| `OSRM_BASE_URL` | private/self-hosted OSRM endpoint; never the public demo server |
 | `BOOTSTRAP_ADMIN_PASSWORD` | a strong password, changed after first login |
 | `CORS_ORIGINS` / `TRUSTED_HOSTS` | the real hostname |
 
 The application **refuses to start** in production if `DEBUG` is on, docs are enabled, HTTPS is not forced, the secret key is short, the fake provider is selected, or the database password is a known default. That check is in `app/core/config.py`; if startup fails, read the message — it names every problem at once.
+
+Route previews use OSRM's Table and Route services for road distances, durations and encoded route geometry. Keep `ROUTING_PROVIDER` separate if serviceability calculations are configured to use another provider. Deploy or provision a private OSRM service with the required regional map extract, then set `OSRM_BASE_URL` on the backend service in Render. The app does not fall back to straight-line distances or to OSRM's public demo service.
 
 ### 1.4 TLS
 
