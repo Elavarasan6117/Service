@@ -230,30 +230,20 @@ def test_route_preview_can_use_osrm_without_changing_google_serviceability_provi
     registry._route_preview = None
 
 
-async def test_google_adapter_parses_distance_matrix(monkeypatch):
+async def test_google_serviceability_uses_routes_matrix_and_parses_road_distances(monkeypatch):
     from app.providers.google import GoogleMapsProvider
 
     provider = GoogleMapsProvider(api_key="test-key")
+    requests = []
 
-    async def fake_get(path, params):
-        assert path == "/distancematrix/json"
-        return {
-            "status": "OK",
-            "rows": [
-                {
-                    "elements": [
-                        {
-                            "status": "OK",
-                            "distance": {"value": 1450.6},
-                            "duration": {"value": 420},
-                        },
-                        {"status": "ZERO_RESULTS"},
-                    ]
-                }
-            ],
-        }
+    async def fake_request(method, url, *, body, field_mask, params=None):
+        requests.append((method, url, body, field_mask))
+        return [
+            {"originIndex": 0, "destinationIndex": 1, "condition": "ROUTE_NOT_FOUND", "status": {}},
+            {"originIndex": 0, "destinationIndex": 0, "condition": "ROUTE_EXISTS", "status": {}, "distanceMeters": 1451, "duration": "420s"},
+        ]
 
-    monkeypatch.setattr(provider, "_get", fake_get)
+    monkeypatch.setattr(provider, "_request_json", fake_request)
     legs = await provider.get_driving_distance(
         Coordinate(13.08, 80.27),
         [Coordinate(13.09, 80.28), Coordinate(13.10, 80.29)],
@@ -263,7 +253,16 @@ async def test_google_adapter_parses_distance_matrix(monkeypatch):
     assert legs[0].distance_meters == 1451  # rounded once, at the boundary
     assert isinstance(legs[0].distance_meters, int)
     assert legs[0].distance_type.value == "ROAD_DISTANCE"
-    assert legs[1] is None, "ZERO_RESULTS for one pair is not a provider failure."
+    assert legs[1] is None, "ROUTE_NOT_FOUND for one pair is not a provider failure."
+    method, url, body, field_mask = requests[0]
+    assert method == "POST"
+    assert url == "https://routes.googleapis.com/distanceMatrix/v2:computeRouteMatrix"
+    assert body["travelMode"] == "DRIVE"
+    assert body["origins"][0]["waypoint"]["location"]["latLng"] == {
+        "latitude": 13.08, "longitude": 80.27,
+    }
+    assert len(body["destinations"]) == 2
+    assert field_mask == "originIndex,destinationIndex,duration,distanceMeters,status,condition"
 
 
 async def test_osrm_batches_origin_table_caches_and_returns_encoded_route():
@@ -359,10 +358,10 @@ async def test_google_adapter_raises_on_misaligned_response(monkeypatch):
 
     provider = GoogleMapsProvider(api_key="test-key")
 
-    async def fake_get(path, params):
-        return {"status": "OK", "rows": [{"elements": [{"status": "OK", "distance": {"value": 100}}]}]}
+    async def fake_request(method, url, *, body, field_mask, params=None):
+        return [{"originIndex": 0, "destinationIndex": 0, "condition": "ROUTE_EXISTS", "status": {}, "distanceMeters": 100}]
 
-    monkeypatch.setattr(provider, "_get", fake_get)
+    monkeypatch.setattr(provider, "_request_json", fake_request)
     with pytest.raises(RoutingProviderError, match="misaligned|mismatched"):
         await provider.get_driving_distance(
             Coordinate(13.08, 80.27),
@@ -381,7 +380,7 @@ async def test_google_quota_exhaustion_is_a_rate_limit_error(monkeypatch):
     from app.providers.google import GoogleMapsProvider
 
     def handler(request: httpx.Request) -> httpx.Response:
-        return httpx.Response(200, json={"status": "OVER_QUERY_LIMIT"})
+        return httpx.Response(429, json={"error": {"status": "RESOURCE_EXHAUSTED"}})
 
     client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
     provider = GoogleMapsProvider(api_key="test-key", client=client)

@@ -3,9 +3,8 @@
 APIs used, all server-side:
   * Geocoding API          — address → coordinates
   * Places Autocomplete    — address search suggestions
-  * Routes API             — computeRouteMatrix road ranking and computeRoutes
-                             distance, duration, alternatives and geometry
-  * Distance Matrix API    — retained for existing serviceability routing
+  * Routes API             — computeRouteMatrix road distance ranking and
+                             computeRoutes duration, alternatives and geometry
 
 The API key is read from settings and never leaves the backend. The browser
 receives only the results of these calls.
@@ -44,9 +43,9 @@ _GEOCODING_V4 = "https://geocode.googleapis.com/v4/geocode"
 _PLACES_V1 = "https://places.googleapis.com/v1"
 _ROUTES_V2 = "https://routes.googleapis.com"
 
-# Google's Distance Matrix limit is 25 destinations per request (and 100
-# elements). We chunk to stay inside it; CANDIDATE_MAX_COUNT is normally well
-# below this, so chunking is a safety net rather than the usual path.
+# Keep requests comfortably within Routes API matrix element limits. The
+# serviceability candidate limit is normally much lower; chunking is a safety
+# net and preserves the provider interface's ability to accept larger lists.
 _MAX_DESTINATIONS_PER_REQUEST = 25
 
 
@@ -348,52 +347,96 @@ class GoogleMapsProvider:
     async def _distance_matrix_chunk(
         self, origin: Coordinate, destinations: list[Coordinate]
     ) -> list[RouteLeg | None]:
-        payload = await self._get(
-            "/distancematrix/json",
-            {
-                "origins": str(origin),
-                "destinations": "|".join(str(d) for d in destinations),
-                "mode": "driving",
-                "units": "metric",
-                "region": settings.GOOGLE_MAPS_REGION,
-                "language": settings.GOOGLE_MAPS_LANGUAGE,
+        payload = await self._request_json(
+            "POST",
+            f"{_ROUTES_V2}/distanceMatrix/v2:computeRouteMatrix",
+            body={
+                "origins": [
+                    {"waypoint": {"location": {"latLng": _lat_lng(origin)}}}
+                ],
+                "destinations": [
+                    {"waypoint": {"location": {"latLng": _lat_lng(point)}}}
+                    for point in destinations
+                ],
+                "travelMode": "DRIVE",
+                "routingPreference": "TRAFFIC_UNAWARE",
             },
+            field_mask="originIndex,destinationIndex,duration,distanceMeters,status,condition",
         )
-
-        rows = payload.get("rows") or []
-        if not rows:
+        if not isinstance(payload, list):
             raise RoutingProviderError(
-                "Distance Matrix returned no rows.", code="PROVIDER_EMPTY_RESPONSE"
+                "Google Routes API returned an invalid route matrix response.",
+                code="PROVIDER_INVALID_RESPONSE",
             )
-
-        elements = rows[0].get("elements") or []
-        if len(elements) != len(destinations):
+        if len(payload) != len(destinations):
             raise RoutingProviderError(
-                "Distance Matrix returned a mismatched number of elements; "
+                "Google Routes API returned a mismatched number of matrix elements; "
                 "the response cannot be aligned to the requested destinations.",
                 code="PROVIDER_RESPONSE_MISALIGNED",
             )
 
-        legs: list[RouteLeg | None] = []
-        for element in elements:
-            if element.get("status") != "OK":
-                # ZERO_RESULTS / NOT_FOUND for one destination is a per-pair
-                # condition, not a provider failure. The engine tolerates it.
-                legs.append(None)
+        legs: list[RouteLeg | None] = [None] * len(destinations)
+        seen_destinations: set[int] = set()
+        for element in payload:
+            if not isinstance(element, dict) or element.get("originIndex", 0) != 0:
                 continue
-            distance = element.get("distance", {}).get("value")
-            duration = element.get("duration", {}).get("value")
-            if distance is None:
-                legs.append(None)
+            destination_index = element.get("destinationIndex")
+            if not isinstance(destination_index, int) or not 0 <= destination_index < len(destinations):
                 continue
-            legs.append(
-                RouteLeg(
-                    # Round to metres exactly once, here at the boundary.
-                    distance_meters=int(round(float(distance))),
-                    duration_seconds=int(duration) if duration is not None else None,
-                    distance_type=DistanceType.ROAD_DISTANCE,
-                    provider=self.name,
+            if destination_index in seen_destinations:
+                raise RoutingProviderError(
+                    "Google Routes API returned duplicate matrix elements.",
+                    code="PROVIDER_RESPONSE_MISALIGNED",
                 )
+            seen_destinations.add(destination_index)
+
+            status = element.get("status") or {}
+            status_code = status.get("code", 0)
+            if status_code == 3:
+                raise RoutingProviderError(
+                    str(status.get("message") or "Google rejected a route matrix coordinate."),
+                    code="PROVIDER_INVALID_REQUEST",
+                )
+            if status_code in (7, 16):
+                raise RoutingProviderError(
+                    str(status.get("message") or "Google denied Routes API access."),
+                    code="PROVIDER_REQUEST_DENIED" if status_code == 7 else "PROVIDER_UNAUTHENTICATED",
+                )
+            if status_code == 8:
+                raise RoutingRateLimitError(
+                    str(status.get("message") or "Google Routes API quota was exceeded."),
+                    code="PROVIDER_QUOTA_EXCEEDED",
+                )
+            if status_code in (4, 13, 14):
+                raise RoutingProviderError(
+                    str(status.get("message") or "Google Routes API is temporarily unavailable."),
+                    code="PROVIDER_HTTP_5XX",
+                )
+            if status_code:
+                logger.warning(
+                    "google_routes_matrix_element_unavailable",
+                    status=status.get("status"),
+                    status_code=status_code,
+                    destination_index=destination_index,
+                )
+                continue
+            if element.get("condition") != "ROUTE_EXISTS":
+                # ROUTE_NOT_FOUND is a per-pair outcome; other candidates may
+                # still produce a valid nearest service location.
+                continue
+            distance = element.get("distanceMeters")
+            if distance is None:
+                continue
+            legs[destination_index] = RouteLeg(
+                distance_meters=int(distance),
+                duration_seconds=_duration_seconds(element.get("duration")),
+                distance_type=DistanceType.ROAD_DISTANCE,
+                provider=self.name,
+            )
+        if len(seen_destinations) != len(destinations):
+            raise RoutingProviderError(
+                "Google Routes API returned an incomplete route matrix.",
+                code="PROVIDER_RESPONSE_MISALIGNED",
             )
         return legs
 

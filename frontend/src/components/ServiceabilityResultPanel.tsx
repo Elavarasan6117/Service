@@ -139,6 +139,11 @@ export function ServiceabilityResultPanel({ result, loading, onRetry, destinatio
               been rejected — we were unable to measure the driving distance.
             </p>
           )}
+          {result.status === 'ROUTE_CALCULATION_ERROR' && result.errorCode && (
+            <p className="subtle" style={{ margin: 0 }}>
+              Routing error: <code>{result.errorCode}</code>
+            </p>
+          )}
           {result.retryable && onRetry && (
             <div>
               <button type="button" className="btn btn--sm" onClick={onRetry}>

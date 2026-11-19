@@ -88,7 +88,7 @@ New customer coordinates
 Stage 1  PostGIS KNN search within (threshold × 4), capped at 10 candidates
         │                                   ← no external calls, no cost
         ▼
-Stage 2  Route cache lookup, then ONE Distance Matrix request for the misses
+Stage 2  Route cache lookup, then one Routes API Compute Route Matrix request for the misses
         │                                   ← 1 origin × N destinations
         ▼
 Nearest by ROAD distance  (frequently not the nearest in a straight line)

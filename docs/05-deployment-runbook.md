@@ -25,7 +25,7 @@ Each has its own `.env`, its own database, and its own Google Maps API key with 
 ### 1.2 Google Cloud project
 
 1. Create a dedicated project for production. Do not reuse the development project — a shared quota means a development loop can exhaust production's.
-2. Enable exactly four APIs: **Geocoding API**, **Places API**, **Distance Matrix API**, **Directions API**.
+2. Enable **Geocoding API**, **Places API**, and **Routes API** for backend geocoding and driving distance/geometry.
 3. Create two API keys. Restrict the server key to the server-side APIs used by the configured providers (Geocoding, Places, and routing APIs). Use an IP restriction only if the host has stable outbound IPs. Restrict the browser key by HTTP referrer and limit it to Maps JavaScript API. For the current Render frontend, allow `https://chennai-svc-frontend.onrender.com/*`; add the exact production custom domain separately if one is configured. The browser key is visible in the downloaded JavaScript by design, so keep both restrictions enabled.
 4. Set a **daily quota cap** on each API. This is the only hard stop against a runaway loop turning into an invoice.
 5. Set a billing budget alert at your expected monthly spend.

@@ -258,14 +258,14 @@ class ResilientRoutingProvider:
     ) -> list[RouteLeg | None]:
         if not destinations:
             return []
-        # Google bills Distance Matrix per element, not per request. This is the
-        # counter that maps to the invoice.
+        # Google bills route-matrix requests by element. Track every requested
+        # destination, including pairs the provider reports as unreachable.
         provider_elements_total.labels(provider=self.name).inc(len(destinations))
         try:
             return await _call_with_retry(
                 lambda: self.inner.get_driving_distance(origin, destinations),
                 provider=self.name,
-                operation="distance_matrix",
+                operation="routes_compute_route_matrix",
                 breaker=self._breaker,
             )
         except ProviderError:

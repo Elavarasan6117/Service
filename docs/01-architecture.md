@@ -12,7 +12,7 @@ These are assumptions, not facts. Each one is called out because a wrong assumpt
 
 | # | Assumption | Impact if wrong |
 |---|---|---|
-| A1 | Routing + geocoding provider is **Google Maps Platform** (Geocoding API, Places Autocomplete, Distance Matrix API, Directions API), with a billing-enabled project and a server-side API key. | Swap the provider adapter only. Nothing else changes — see §5. |
+| A1 | Routing + geocoding provider is **Google Maps Platform** (Geocoding API, Places API, Routes API), with a billing-enabled project and a server-side API key. | Swap the provider adapter only. Nothing else changes — see §5. |
 | A2 | Existing service locations will be supplied later. Today they exist only as **points on a map image** (green/yellow markers plus a warehouse marker). Coordinates must be digitised before go-live. | Section §9 defines the digitisation path. The importer accepts CSV/XLSX and geocodes rows with missing coordinates. |
 | A3 | Single warehouse in Chennai to start; the schema supports many. | None — `warehouses` is already a table, not a config value. |
 | A4 | All coordinates are WGS84 (EPSG:4326). Distance maths is done in **integer metres**. | None. |
@@ -217,7 +217,7 @@ flowchart LR
     E --> F["Redis cache lookup<br/>per (customer_pt, service_pt) pair"]
     F --> G{"all cached?"}
     G -->|yes| I["0 routing calls"]
-    G -->|no| H["Stage 2 — one Distance Matrix call<br/>1 origin × N destinations"]
+    G -->|no| H["Stage 2 — one Routes API matrix call<br/>1 origin × N destinations"]
     H --> I["Road distances in metres"]
     I --> J["nearest = argmin(road distance)"]
     J --> K{"nearest <= threshold_m ?"}
@@ -227,7 +227,7 @@ flowchart LR
     M --> N
 ```
 
-Cost per check in the worst case: **1 geocode + 1 Distance Matrix element-batch + 1 Directions call**, regardless of whether there are 100 or 100,000 service locations. With a warm cache it is often **zero** routing calls.
+Cost per check in the worst case: **1 geocode + 1 Routes API matrix element-batch + 1 route-geometry call**, regardless of whether there are 100 or 100,000 service locations. With a warm cache it is often **zero** routing calls.
 
 Stage 1 radius is `threshold_m × CANDIDATE_RADIUS_FACTOR` (default 4.0 → 8 km for a 2 km threshold). The factor exists because road distance always exceeds straight-line distance; a detour ratio of 4 is generous for Chennai's grid and guarantees the true road-nearest location is inside the candidate set. It is configurable and audited.
 

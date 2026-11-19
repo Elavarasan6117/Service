@@ -37,7 +37,7 @@ services:
       - key: SEED_ARGS
         value: --demo
       - key: ROUTING_PROVIDER
-        value: fake
+        value: google_maps
       # Optional legacy POST /routes/preview API provider. The dashboard's
       # Google Maps directions link does not depend on this setting.
       - key: ROUTE_PREVIEW_PROVIDER
