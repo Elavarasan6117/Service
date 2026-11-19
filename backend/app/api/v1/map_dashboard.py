@@ -216,7 +216,9 @@ def _route_provider_failure(exc: ProviderError) -> tuple[str, str]:
         return f"{summary} Routing provider response: {message}"
 
     if code == "PROVIDER_NOT_CONFIGURED":
-        return "ROUTING_PROVIDER_NOT_CONFIGURED", "Configure ROUTE_PREVIEW_PROVIDER=osrm and OSRM_BASE_URL in the backend environment."
+        return "ROUTING_PROVIDER_NOT_CONFIGURED", with_provider_detail("Configure ROUTE_PREVIEW_PROVIDER=osrm and OSRM_BASE_URL in the backend environment.")
+    if code == "PROVIDER_CONNECT_ERROR":
+        return "ROUTE_SERVICE_UNAVAILABLE", message
     if code == "PROVIDER_NO_ROUTE":
         return "NO_DRIVING_ROUTE", "No road route is available between these coordinates."
     if code == "PROVIDER_INVALID_REQUEST":

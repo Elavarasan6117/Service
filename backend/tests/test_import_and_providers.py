@@ -320,6 +320,39 @@ async def test_osrm_batches_origin_table_caches_and_returns_encoded_route():
     await client.aclose()
 
 
+async def test_osrm_missing_or_public_production_endpoint_fails_with_configuration_error(monkeypatch):
+    from app.core.config import settings
+    from app.providers.osrm import OsrmProvider
+
+    monkeypatch.setattr(settings, "ENVIRONMENT", "qa")
+    missing = OsrmProvider(base_url="")
+    with pytest.raises(RoutingProviderError, match="OSRM_BASE_URL") as missing_error:
+        await missing.get_driving_distances([Coordinate(13.01, 80.22)], Coordinate(13.08, 80.27))
+    assert missing_error.value.code == "PROVIDER_NOT_CONFIGURED"
+
+    public_demo = OsrmProvider(base_url="https://router.project-osrm.org")
+    with pytest.raises(RoutingProviderError, match="public OSRM demo") as public_error:
+        await public_demo.get_driving_distances([Coordinate(13.01, 80.22)], Coordinate(13.08, 80.27))
+    assert public_error.value.code == "PROVIDER_NOT_CONFIGURED"
+
+
+async def test_osrm_connect_error_reports_private_endpoint_guidance_without_url_leak():
+    import httpx
+
+    from app.providers.osrm import OsrmProvider
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectError("failed for http://user:secret@osrm.private", request=request)
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    provider = OsrmProvider(base_url="http://osrm.private", client=client)
+    with pytest.raises(RoutingProviderError, match="Cannot connect to OSRM") as error:
+        await provider.get_driving_distances([Coordinate(13.01, 80.22)], Coordinate(13.08, 80.27))
+    assert error.value.code == "PROVIDER_CONNECT_ERROR"
+    assert "secret" not in str(error.value)
+    await client.aclose()
+
+
 async def test_google_adapter_raises_on_misaligned_response(monkeypatch):
     """A response we cannot align to our request must fail, not be guessed at."""
     from app.providers.google import GoogleMapsProvider

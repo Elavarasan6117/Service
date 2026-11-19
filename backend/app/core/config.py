@@ -101,7 +101,9 @@ class Settings(BaseSettings):
     # osm.org Nominatim endpoint's "light manual use only" policy.
     PHOTON_BASE_URL: str = "https://photon.komoot.io"
 
-    OSRM_BASE_URL: str = "http://localhost:5000"
+    # Empty by default so a deployed backend never silently points at its own
+    # container instead of the separately hosted private OSRM service.
+    OSRM_BASE_URL: str = ""
 
     PROVIDER_TIMEOUT_SECONDS: float = 8.0
     PROVIDER_MAX_RETRIES: int = 3

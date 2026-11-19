@@ -14,6 +14,7 @@ import asyncio
 import json
 import time
 from typing import Any
+from urllib.parse import urlparse
 
 import httpx
 
@@ -34,7 +35,8 @@ class OsrmProvider:
     def __init__(
         self, base_url: str | None = None, client: httpx.AsyncClient | None = None
     ) -> None:
-        self.base_url = (base_url or settings.OSRM_BASE_URL).rstrip("/")
+        configured_url = settings.OSRM_BASE_URL if base_url is None else base_url
+        self.base_url = configured_url.strip().rstrip("/")
         self._client = client
         self._owns_client = client is None
         self._response_cache: dict[str, tuple[float, Any]] = {}
@@ -62,6 +64,7 @@ class OsrmProvider:
         In-flight requests are shielded so one disconnected dashboard request
         does not cancel work shared by another caller in the same worker.
         """
+        self._validate_endpoint()
         cache_key = f"{path}?{json.dumps(params, sort_keys=True, separators=(',', ':'))}"
         now = time.monotonic()
         async with self._cache_lock:
@@ -82,13 +85,49 @@ class OsrmProvider:
                 self._inflight[cache_key] = task
         return await asyncio.shield(task)
 
+    def _validate_endpoint(self) -> None:
+        if not self.base_url:
+            raise RoutingProviderError(
+                "OSRM_BASE_URL is not configured. Set it to a private, reachable OSRM service in the backend environment.",
+                code="PROVIDER_NOT_CONFIGURED",
+            )
+        parsed = urlparse(self.base_url)
+        if parsed.scheme not in ("http", "https") or not parsed.hostname or parsed.username or parsed.password:
+            raise RoutingProviderError(
+                "OSRM_BASE_URL must be an HTTP(S) URL without embedded credentials.",
+                code="PROVIDER_NOT_CONFIGURED",
+            )
+        hostname = parsed.hostname.lower()
+        if settings.ENVIRONMENT != "development" and hostname in (
+            "localhost", "127.0.0.1", "::1", "router.project-osrm.org",
+        ):
+            raise RoutingProviderError(
+                "OSRM_BASE_URL must point to a private reachable service; loopback and the public OSRM demo are not production endpoints.",
+                code="PROVIDER_NOT_CONFIGURED",
+            )
+
     async def _fetch_and_cache(
         self, cache_key: str, path: str, params: dict[str, str]
     ) -> Any:
         try:
             try:
                 response = await self.client.get(f"{self.base_url}{path}", params=params)
+            except httpx.ConnectError as exc:
+                logger.warning(
+                    "osrm_connection_failed",
+                    operation=path.split("/", 2)[1] if path.startswith("/") else "unknown",
+                    error_type=type(exc).__name__,
+                )
+                raise RoutingProviderError(
+                    "Cannot connect to OSRM. Check that the private OSRM service is running and OSRM_BASE_URL is reachable from the backend.",
+                    code="PROVIDER_CONNECT_ERROR",
+                ) from exc
             except httpx.HTTPError as exc:
+                logger.warning(
+                    "osrm_request_failed",
+                    operation=path.split("/", 2)[1] if path.startswith("/") else "unknown",
+                    error_type=type(exc).__name__,
+                )
                 raise RoutingProviderError(
                     f"OSRM transport error ({type(exc).__name__})."
                 ) from exc
@@ -280,11 +319,15 @@ class OsrmProvider:
 
     async def health_check(self) -> bool:
         try:
+            self._validate_endpoint()
+        except RoutingProviderError:
+            return False
+        try:
             response = await self.client.get(
                 f"{self.base_url}/route/v1/driving/80.2707,13.0827;80.2100,13.0850",
                 params={"overview": "false"},
             )
             return response.status_code == 200
         except Exception as exc:  # noqa: BLE001
-            logger.warning("osrm_health_check_failed", error=str(exc))
+            logger.warning("osrm_health_check_failed", error_type=type(exc).__name__)
             return False
