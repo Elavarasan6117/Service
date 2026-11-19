@@ -43,7 +43,7 @@ Then open **http://localhost:8080** and sign in with `BOOTSTRAP_ADMIN_USERNAME` 
 
 **Without a Google key**, set `ROUTING_PROVIDER=fake` and `GEOCODING_PROVIDER=photon` in `.env` for local address lookup against Komoot's public Photon instance (same OpenStreetMap data as Nominatim, but built for application traffic rather than light manual use) and synthetic road distances. `GEOCODING_PROVIDER=nominatim` also works but talks to the raw osm.org endpoint directly, whose usage policy will start rejecting requests under any real usage. The application refuses to start in production with the fake provider selected.
 
-Map route previews use `ROUTE_PREVIEW_PROVIDER=osrm` and `OSRM_BASE_URL`; point this at a self-hosted OSRM instance for local or production routing. Do not use the public OSRM demo server for production traffic. Google Maps display, autocomplete and geocoding remain configured independently.
+After a serviceability check, the dashboard offers a Google Maps driving-directions link from the nearest eligible Service Location to the customer. This redirect does not calculate or return distance to the application: backend serviceability continues to use its configured road-distance provider and threshold. The legacy `POST /api/v1/routes/preview` API remains available and still uses its separately configured preview provider; the dashboard no longer calls it, so OSRM is not required for this directions-link workflow.
 
 > The seeded service locations are **synthetic** — plausible points in real Chennai localities, not the operational network. Replace them with the real data through the importer before UAT. See §9 of the architecture document for how to digitise the existing map.
 

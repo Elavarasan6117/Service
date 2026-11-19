@@ -1,10 +1,9 @@
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useState } from 'react'
 import { Link } from 'react-router-dom'
 
 import { api, ApiError } from '../api/client'
 import { CustomerForm } from '../components/CustomerForm'
 import { OperationsMap } from '../components/OperationsMap'
-import { RoutePreviewPanel } from '../components/RoutePreviewPanel'
 import { QuickAddLocationForm } from '../components/QuickAddLocationForm'
 import { ServiceabilityResultPanel } from '../components/ServiceabilityResultPanel'
 import { StatusBadge } from '../components/StatusBadge'
@@ -15,7 +14,6 @@ import type {
   MapOperations,
   ServiceabilityCheck,
   ServiceabilityResult,
-  RoutePreviewResult,
 } from '../types/api'
 
 interface Props {
@@ -73,53 +71,6 @@ export function DashboardPage({
     longitude: number
     address: string
   } | null>(null)
-  const [routePreview, setRoutePreview] = useState<RoutePreviewResult | null>(null)
-  const [routeLoading, setRouteLoading] = useState(false)
-  const [searchRadiusKm, setSearchRadiusKm] = useState(25)
-  const [routeFailure, setRouteFailure] = useState<string | null>(null)
-  const routeRequestId = useRef(0)
-
-  useEffect(() => {
-    const requestId = ++routeRequestId.current
-    if (!draftPoint) {
-      setRoutePreview(null)
-      setRouteFailure(null)
-      setRouteLoading(false)
-      return
-    }
-    setRoutePreview(null)
-    setRouteFailure(null)
-    setRouteLoading(true)
-    let controller: AbortController | null = null
-    const timer = window.setTimeout(async () => {
-      controller = new AbortController()
-      try {
-        const response = await api.previewRoutes(
-          draftPoint.latitude,
-          draftPoint.longitude,
-          activeCustomer?.id,
-          searchRadiusKm,
-          controller.signal,
-        )
-        if (routeRequestId.current !== requestId) return
-        setRoutePreview(response)
-      } catch (exception) {
-        if (routeRequestId.current === requestId && !controller.signal.aborted) {
-          setRoutePreview(null)
-          setRouteFailure(exception instanceof ApiError
-            ? exception.message
-            : 'Unable to calculate nearby driving routes. Please try again.')
-        }
-      } finally {
-        if (routeRequestId.current === requestId) setRouteLoading(false)
-      }
-    }, 450)
-    return () => {
-      window.clearTimeout(timer)
-      controller?.abort()
-    }
-  }, [draftPoint, activeCustomer?.id, searchRadiusKm])
-
   const refresh = useCallback(async () => {
     try {
       const [map, dashboardMetrics, history] = await Promise.all([
@@ -169,7 +120,7 @@ export function DashboardPage({
         latitude: response.customer.latitude,
         longitude: response.customer.longitude,
       })
-    }
+    } else setDraftPoint(null)
     // The form has been cleared; do not let the map's point refill its
     // coordinate fields.
     setFormPoint(null)
@@ -330,6 +281,10 @@ export function DashboardPage({
               result={result}
               loading={checking}
               onRetry={retryCheck}
+              destination={draftPoint ? {
+                ...draftPoint,
+                address: activeCustomer?.formattedAddress ?? activeCustomer?.address ?? selectedLocation?.address,
+              } : null}
             />
             {pendingMove && activeCustomer && canAdjustLocation && (
               <div className="row" style={{ marginTop: 13 }}>
@@ -404,7 +359,6 @@ export function DashboardPage({
               data={mapData}
               result={result}
               draftPoint={draftPoint}
-              routePreview={routePreview}
               draggable={canAdjustLocation}
               onDragEnd={(latitude, longitude) => {
                 handleMapLocation(latitude, longitude)
@@ -428,13 +382,6 @@ export function DashboardPage({
                 if (id === 'warehouse-draft') setWarehouseDraftPoint({ latitude, longitude })
                 else if (id === 'service-draft') setServiceDraftPoint({ latitude, longitude })
               }}
-            />
-            <RoutePreviewPanel
-              result={routePreview}
-              loading={routeLoading}
-              error={routeFailure}
-              searchRadiusKm={searchRadiusKm}
-              onSearchRadiusChange={setSearchRadiusKm}
             />
           </div>
         </div>

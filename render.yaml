@@ -38,12 +38,11 @@ services:
         value: --demo
       - key: ROUTING_PROVIDER
         value: fake
-      # Route previews use OSRM road routes while preserving the existing
-      # serviceability provider and decisions.
+      # Optional legacy POST /routes/preview API provider. The dashboard's
+      # Google Maps directions link does not depend on this setting.
       - key: ROUTE_PREVIEW_PROVIDER
         value: osrm
-      # Set this to a private, self-hosted OSRM endpoint. Do not use the public
-      # OSRM demo server for production traffic.
+      # Needed only when the legacy route-preview API is used with OSRM.
       - key: OSRM_BASE_URL
         sync: false
       - key: GEOCODING_PROVIDER

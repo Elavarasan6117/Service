@@ -1,13 +1,12 @@
 import { useEffect, useRef, useState } from 'react'
 
-import type { MapOperations, RoutePreviewResult, ServiceabilityResult } from '../types/api'
+import type { MapOperations, ServiceabilityResult } from '../types/api'
 import { STATUS_MARKER_COLOR } from './StatusBadge'
 import { decodePolyline } from '../lib/polyline'
 
 interface Props {
   data: MapOperations | null
   result: ServiceabilityResult | null
-  routePreview?: RoutePreviewResult | null
   /** The point currently being assessed, which the operator can drag. */
   draftPoint: { latitude: number; longitude: number } | null
   draggable: boolean
@@ -83,7 +82,6 @@ function escapeHtml(value: string): string {
 export function OperationsMap({
   data,
   result,
-  routePreview = null,
   draftPoint,
   draggable,
   onDragEnd,
@@ -327,81 +325,6 @@ export function OperationsMap({
     for (const line of focusLinesRef.current) line.setMap(null)
     focusMarkersRef.current = []
     focusLinesRef.current = []
-    if (routePreview && draftPoint) {
-      const bounds = new window.google!.maps.LatLngBounds()
-      const destination = { lat: draftPoint.latitude, lng: draftPoint.longitude }
-      bounds.extend(destination)
-      const routeByKind = {
-        WAREHOUSE: routePreview.routes.find((route) => route.origin.kind === 'WAREHOUSE'),
-        CUSTOMER: routePreview.routes.find((route) => route.origin.kind === 'CUSTOMER'),
-      }
-      const origins = [
-        { kind: 'WAREHOUSE' as const, origin: routePreview.nearestWarehouse, color: '#4b2e83', label: 'W' },
-        { kind: 'CUSTOMER' as const, origin: routePreview.nearestCustomer, color: '#17803d', label: 'C' },
-      ]
-      for (const item of origins) {
-        if (!item.origin) continue
-        const position = { lat: item.origin.latitude, lng: item.origin.longitude }
-        bounds.extend(position)
-        const marker = new window.google!.maps.Marker({
-          map,
-          position,
-          title: `${item.kind === 'WAREHOUSE' ? 'Warehouse' : 'Existing customer'} start: ${item.origin.name}`,
-          zIndex: 950,
-          icon: markerIcon(item.color, 10),
-          label: { text: item.label, color: '#ffffff', fontWeight: '700', fontSize: '10px' },
-        })
-        const info = new window.google!.maps.InfoWindow({ content: `<strong>${escapeHtml(item.origin.name)}</strong><br/>${item.kind === 'WAREHOUSE' ? 'Warehouse' : 'Existing customer'} route start` })
-        marker.addListener('click', () => info.open({ map, anchor: marker }))
-        focusMarkersRef.current.push({ marker, info })
-      }
-      const drawRoutes: {
-        path: google.maps.LatLngLiteral[]
-        color: string
-        weight: number
-      }[] = []
-      for (const route of Object.values(routeByKind)) {
-        if (!route?.geometry || route.geometryFormat !== 'encoded_polyline_5') continue
-        const points = decodePolyline(route.geometry)
-        if (points.length < 2) continue
-        const path = points.map(([lat, lng]) => ({ lat, lng }))
-        const warehouseRoute = route.origin.kind === 'WAREHOUSE'
-        drawRoutes.push({
-          path,
-          color: warehouseRoute ? '#2563EB' : '#E11D48',
-          // The customer route is narrower and drawn above the warehouse
-          // route, leaving blue edges visible where the road paths overlap.
-          weight: warehouseRoute ? 8 : 5,
-        })
-        for (const point of path) bounds.extend(point)
-      }
-
-      // Give each actual road path a white casing so it stays legible over
-      // detailed map labels, and draw both routes independently on the same map.
-      for (const route of drawRoutes) {
-        focusLinesRef.current.push(new window.google!.maps.Polyline({
-          map,
-          path: route.path,
-          strokeColor: '#ffffff',
-          strokeWeight: route.weight + 4,
-          strokeOpacity: 0.95,
-          clickable: false,
-        }))
-      }
-      for (const route of drawRoutes) {
-        const line = new window.google!.maps.Polyline({
-          map,
-          path: route.path,
-          strokeColor: route.color,
-          strokeWeight: route.weight,
-          strokeOpacity: 1,
-          clickable: false,
-        })
-        focusLinesRef.current.push(line)
-      }
-      map.fitBounds(bounds, 48)
-      return
-    }
     if (!result?.nearestServiceLocation || !draftPoint) return
 
     const nearest = result.nearestServiceLocation
@@ -437,7 +360,7 @@ export function OperationsMap({
       for (const point of path) bounds.extend(point)
       map.fitBounds(bounds, 48)
     }
-  }, [result, draftPoint, routePreview, mapReady])
+  }, [result, draftPoint, mapReady])
 
   const serviceLocations = data?.serviceLocations.filter(
     (location) => location.latitude != null && location.longitude != null,
@@ -478,8 +401,6 @@ export function OperationsMap({
         <div className="map-legend__row"><span className="map-legend__swatch" style={{ background: '#0f7b3d' }} />Available / nearest</div>
         <div className="map-legend__row"><span className="map-legend__swatch" style={{ background: '#b4232b' }} />Not available</div>
         <div className="map-legend__row"><span className="map-legend__swatch" style={{ background: '#9a5b06' }} />Needs verification</div>
-        <div className="map-legend__row"><span className="route-preview__swatch route-preview__swatch--warehouse" />Warehouse → new customer route</div>
-        <div className="map-legend__row"><span className="route-preview__swatch route-preview__swatch--customer" />Existing customer → new customer route</div>
       </div>
     </div>
   )
