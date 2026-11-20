@@ -18,6 +18,7 @@ import type {
   CustomerCreateResponse,
   DashboardMetrics,
   MapOperations,
+  RoutePreviewResult,
   Page,
   ServiceabilityCheck,
   ServiceabilityResult,
@@ -269,6 +270,28 @@ export const api = {
 
   mapOperations: (params: Record<string, string | number | undefined> = {}) =>
     request<MapOperations>(`/map/operations${qs(params)}`),
+
+  previewRoutes: (
+    latitude: number,
+    longitude: number,
+    excludeCustomerId?: string | null,
+    searchRadiusKm = 25,
+    candidateLimitPerType = 12,
+    destinationAddress?: string | null,
+    signal?: AbortSignal,
+  ) =>
+    request<RoutePreviewResult>('/routes/preview', {
+      method: 'POST',
+      body: JSON.stringify({
+        latitude,
+        longitude,
+        excludeCustomerId,
+        searchRadiusKm,
+        candidateLimitPerType,
+        destinationAddress,
+      }),
+      signal,
+    }),
 
   dashboardMetrics: () => request<DashboardMetrics>('/dashboard/metrics'),
 

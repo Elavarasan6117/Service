@@ -95,7 +95,7 @@ async def test_route_preview_uses_active_warehouse_and_returns_road_route(
     client, ops_user, warehouse, monkeypatch
 ):
     class StubRoadProvider:
-        name = "osrm"
+        name = "google_maps"
 
         async def get_driving_distances(self, origins, destination):
             return [RouteLeg(4200, 720, provider=self.name) for _ in origins]
@@ -107,11 +107,66 @@ async def test_route_preview_uses_active_warehouse_and_returns_road_route(
                 geometry="_p~iF~ps|U_ulLnnqC_mqNvxq`@",
                 geometry_format="encoded_polyline_5",
                 provider=self.name,
+            ), RouteDetail(
+                distance_meters=5100,
+                duration_seconds=600,
+                geometry="_p~iF~ps|U_ulLnnqC_mqNvxq`@",
+                geometry_format="encoded_polyline_5",
+                provider=self.name,
             )]
 
     monkeypatch.setattr(
-        "app.api.v1.map_dashboard.get_route_preview_provider",
+        "app.api.v1.map_dashboard.get_routing_provider",
         lambda: StubRoadProvider(),
+    )
+    response = await client.post(
+        "/api/v1/routes/preview",
+        headers=auth_headers(ops_user),
+        json={"latitude": 13.08, "longitude": 80.27, "destinationAddress": "Test destination"},
+    )
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["nearestWarehouse"]["id"] == str(warehouse.id)
+    assert body["nearestCustomer"] is None
+    assert body["routes"]
+    assert len(body["routes"]) == 2
+    assert body["destinationAddress"] == "Test destination"
+    assert body["routes"][0]["distanceMeters"] > 0
+    assert body["routes"][0]["availability"] == "CALCULATED_UNVERIFIED"
+    assert body["routes"][0]["geometry"] == "_p~iF~ps|U_ulLnnqC_mqNvxq`@"
+    assert body["warehouseRouteStatus"] == "CALCULATED_UNVERIFIED"
+    assert body["customerRouteStatus"] == "NO_NEARBY_LOCATION"
+
+
+async def test_route_preview_keeps_warehouse_route_when_customer_route_fails(
+    client, ops_user, warehouse, session, monkeypatch
+):
+    customer = Customer(
+        customer_code="C-ROUTE-FAIL", customer_name="Customer origin",
+        address="Test Road, Chennai", city="Chennai",
+        latitude=Decimal("13.0795000"), longitude=Decimal("80.2680000"),
+    )
+    session.add(customer)
+    await session.commit()
+
+    class PartialFailureProvider:
+        name = "google_maps"
+
+        async def get_driving_distances(self, origins, destination):
+            return [RouteLeg(1800, 360, provider=self.name) for _ in origins]
+
+        async def get_driving_routes(self, origin, destination):
+            if origin.latitude == float(customer.latitude):
+                raise RoutingProviderError("customer route temporarily failed", code="PROVIDER_CONNECT_ERROR")
+            return [RouteDetail(
+                distance_meters=1800, duration_seconds=360,
+                geometry="_p~iF~ps|U_ulLnnqC_mqNvxq`@",
+                geometry_format="encoded_polyline_5", provider=self.name,
+            )]
+
+    monkeypatch.setattr(
+        "app.api.v1.map_dashboard.get_routing_provider",
+        lambda: PartialFailureProvider(),
     )
     response = await client.post(
         "/api/v1/routes/preview",
@@ -120,14 +175,10 @@ async def test_route_preview_uses_active_warehouse_and_returns_road_route(
     )
     assert response.status_code == 200, response.text
     body = response.json()
-    assert body["nearestWarehouse"]["id"] == str(warehouse.id)
-    assert body["nearestCustomer"] is None
-    assert body["routes"]
-    assert body["routes"][0]["distanceMeters"] > 0
-    assert body["routes"][0]["availability"] == "CALCULATED_UNVERIFIED"
-    assert body["routes"][0]["geometry"] == "_p~iF~ps|U_ulLnnqC_mqNvxq`@"
+    assert [route["origin"]["kind"] for route in body["routes"]] == ["WAREHOUSE"]
     assert body["warehouseRouteStatus"] == "CALCULATED_UNVERIFIED"
-    assert body["customerRouteStatus"] == "NO_NEARBY_LOCATION"
+    assert body["customerRouteStatus"] == "ROUTE_SERVICE_UNAVAILABLE"
+    assert "temporarily failed" in body["customerRouteMessage"]
 
 
 async def test_route_preview_selects_road_nearest_eligible_origins_and_skips_unreachable(
@@ -166,7 +217,7 @@ async def test_route_preview_selects_road_nearest_eligible_origins_and_skips_unr
         return road_meters.get((round(point.latitude, 4), round(point.longitude, 4)))
 
     class StubRoadProvider:
-        name = "osrm"
+        name = "google_maps"
 
         async def get_driving_distances(self, origins, destination):
             return [
@@ -185,7 +236,7 @@ async def test_route_preview_selects_road_nearest_eligible_origins_and_skips_unr
             )]
 
     monkeypatch.setattr(
-        "app.api.v1.map_dashboard.get_route_preview_provider",
+        "app.api.v1.map_dashboard.get_routing_provider",
         lambda: StubRoadProvider(),
     )
     response = await client.post(
@@ -200,7 +251,7 @@ async def test_route_preview_selects_road_nearest_eligible_origins_and_skips_unr
     assert body["nearestCustomer"]["id"] == str(customers[0].id)
     assert body["nearestCustomer"]["distanceMeters"] == 1300
     assert {route["origin"]["kind"] for route in body["routes"]} == {"WAREHOUSE", "CUSTOMER"}
-    assert all(route["provider"] == "osrm" for route in body["routes"])
+    assert all(route["provider"] == "google_maps" for route in body["routes"])
 
 
 async def test_login_succeeds_and_returns_tokens(client, ops_user):

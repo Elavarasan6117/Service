@@ -189,6 +189,43 @@ export interface MapOperations {
   generatedAt: string
 }
 
+export type RouteOriginKind = 'WAREHOUSE' | 'CUSTOMER'
+
+export interface RoutePreviewOrigin {
+  id: string
+  name: string
+  kind: RouteOriginKind
+  latitude: number
+  longitude: number
+  distanceMeters: number
+  address: string | null
+}
+
+export interface RoutePreview {
+  id: string
+  origin: RoutePreviewOrigin
+  distanceMeters: number
+  durationSeconds: number | null
+  geometry: string | null
+  geometryFormat: string
+  provider: string
+  availability: 'CALCULATED_UNVERIFIED' | 'ROUTE_GEOMETRY_UNAVAILABLE'
+}
+
+export interface RoutePreviewResult {
+  destinationLatitude: number
+  destinationLongitude: number
+  destinationAddress: string | null
+  nearestWarehouse: RoutePreviewOrigin | null
+  nearestCustomer: RoutePreviewOrigin | null
+  routes: RoutePreview[]
+  warehouseRouteStatus: string
+  customerRouteStatus: string
+  warehouseRouteMessage: string | null
+  customerRouteMessage: string | null
+  message: string | null
+}
+
 export interface DashboardMetrics {
   date: string
   newCustomers: number

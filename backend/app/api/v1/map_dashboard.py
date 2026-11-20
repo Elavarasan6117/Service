@@ -2,6 +2,10 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
+import math
+import re
 import uuid
 from datetime import date, datetime, time, timedelta, timezone
 from decimal import Decimal
@@ -13,7 +17,8 @@ from sqlalchemy import Numeric, cast, func, select
 from app.api.deps import ConfigDep, DbSession, require
 from app.core.config import settings
 from app.core.enums import EntityStatus, LocationStatus, Permission, ServiceStatus
-from app.core.errors import NotFoundError, ProviderError
+from app.core.errors import NotFoundError, ProviderError, RoutingProviderError
+from app.core.logging import get_logger
 from app.models.customer import Customer
 from app.models.route import Route
 from app.models.service_location import ServiceLocation
@@ -33,14 +38,19 @@ from app.schemas.misc import (
 )
 from app.services.config_service import KEY_THRESHOLD
 from app.services.spatial_search import SpatialSearchService
-from app.models.user import User
 from app.providers.base import Coordinate
-from app.providers.registry import get_route_preview_provider
-from app.schemas.misc import RoutePreviewRequest, RoutePreviewResponse, PreviewOrigin, PreviewRoute
-import math
-import re
+from app.providers.registry import get_routing_provider
+from app.models.user import User
+from app.schemas.misc import (
+    PreviewOrigin,
+    PreviewRoute,
+    RoutePreviewRequest,
+    RoutePreviewResponse,
+)
+from app.services import cache as route_cache
 
 router = APIRouter(tags=["map-and-dashboard"])
+logger = get_logger(__name__)
 
 IST = ZoneInfo(settings.TIMEZONE)
 
@@ -51,22 +61,38 @@ async def preview_vehicle_routes(
     session: DbSession,
     user: User = Depends(require(Permission.VIEW)),
 ) -> RoutePreviewResponse:
-    """Return temporary four-wheeler route options from nearby active records."""
+    """Find road-nearest eligible origins and return independent route alternatives."""
     destination = Coordinate(payload.latitude, payload.longitude)
-    warehouses = (await session.execute(select(Warehouse).where(
-        Warehouse.status == EntityStatus.ACTIVE
-    ))).scalars().all()
-    customer_filter = (
-        [Customer.id != payload.exclude_customer_id]
-        if payload.exclude_customer_id else []
+    # A bounding box reduces database rows before exact geographic filtering.
+    latitude_delta = payload.search_radius_km / 110.6
+    longitude_delta = payload.search_radius_km / (
+        110.6 * max(abs(math.cos(math.radians(payload.latitude))), 0.05)
     )
-    existing_customers = (await session.execute(
-        select(Customer).where(*customer_filter)
+    min_lat = max(-90.0, payload.latitude - latitude_delta)
+    max_lat = min(90.0, payload.latitude + latitude_delta)
+    min_lng = max(-180.0, payload.longitude - longitude_delta)
+    max_lng = min(180.0, payload.longitude + longitude_delta)
+
+    warehouses = (await session.execute(
+        select(Warehouse).where(
+            Warehouse.status == EntityStatus.ACTIVE,
+            Warehouse.latitude.between(min_lat, max_lat),
+            Warehouse.longitude.between(min_lng, max_lng),
+        )
     )).scalars().all()
-    customers_with_coordinates = [
-        customer for customer in existing_customers
-        if customer.latitude is not None and customer.longitude is not None
+    customer_filters = [
+        Customer.latitude.is_not(None),
+        Customer.longitude.is_not(None),
+        Customer.latitude.between(-90, 90),
+        Customer.longitude.between(-180, 180),
+        Customer.latitude.between(min_lat, max_lat),
+        Customer.longitude.between(min_lng, max_lng),
     ]
+    if payload.exclude_customer_id:
+        customer_filters.append(Customer.id != payload.exclude_customer_id)
+    existing_customers = (await session.execute(
+        select(Customer).where(*customer_filters)
+    )).scalars().all()
 
     def distance_km(lat: float, lng: float) -> float:
         lat1, lat2 = math.radians(payload.latitude), math.radians(lat)
@@ -74,51 +100,72 @@ async def preview_vehicle_routes(
         a = math.sin(dlat / 2) ** 2 + math.cos(lat1) * math.cos(lat2) * math.sin(dlng / 2) ** 2
         return 6371.0088 * 2 * math.asin(math.sqrt(a))
 
-    candidates: list[tuple[PreviewOrigin, Coordinate, float]] = []
+    candidates: list[tuple[PreviewOrigin, Coordinate, float, str]] = []
     for item in warehouses:
         lat, lng = float(item.latitude), float(item.longitude)
         air = distance_km(lat, lng)
         if air <= payload.search_radius_km:
-            candidates.append((PreviewOrigin(id=item.id, name=item.warehouse_name, kind="WAREHOUSE", latitude=lat, longitude=lng, distance_meters=0, address=item.address), Coordinate(lat, lng), air))
-    for item in customers_with_coordinates:
+            origin = PreviewOrigin(
+                id=item.id, name=item.warehouse_name, kind="WAREHOUSE",
+                latitude=lat, longitude=lng, distance_meters=0, address=item.address,
+            )
+            candidates.append((origin, Coordinate(lat, lng), air, item.updated_at.isoformat()))
+    for item in existing_customers:
         lat, lng = float(item.latitude), float(item.longitude)
         air = distance_km(lat, lng)
         if air <= payload.search_radius_km:
-            candidates.append((PreviewOrigin(id=item.id, name=item.customer_name, kind="CUSTOMER", latitude=lat, longitude=lng, distance_meters=0, address=item.address), Coordinate(lat, lng), air))
+            origin = PreviewOrigin(
+                id=item.id, name=item.customer_name, kind="CUSTOMER",
+                latitude=lat, longitude=lng, distance_meters=0, address=item.address,
+            )
+            candidates.append((origin, Coordinate(lat, lng), air, item.updated_at.isoformat()))
 
-    # Keep a broad geographic shortlist for each origin type. Road distances,
-    # never straight-line distance, determine the displayed ranking. Keeping
-    # the types separately prevents many nearby customers from hiding a warehouse.
+    # Geographical distance only narrows the shortlist. The Routes API road
+    # matrix ranks candidates independently for each origin type.
     candidates = [
         row for kind in ("WAREHOUSE", "CUSTOMER")
         for row in sorted(
             (candidate for candidate in candidates if candidate[0].kind == kind),
             key=lambda candidate: candidate[2],
-        )[:12]
+        )[:payload.candidate_limit_per_type]
     ]
+    provider = get_routing_provider()
+    cache_key = _route_preview_cache_key(payload, provider.name, candidates)
+    cached = await _get_route_preview_cache(cache_key)
+    if cached is not None:
+        return cached
+
     routes: list[PreviewRoute] = []
     road_ranked: list[tuple[PreviewOrigin, Coordinate, int]] = []
-    provider = get_route_preview_provider()
     route_status = {"WAREHOUSE": "NO_NEARBY_LOCATION", "CUSTOMER": "NO_NEARBY_LOCATION"}
     route_message: dict[str, str | None] = {"WAREHOUSE": None, "CUSTOMER": None}
     has_warehouse_candidates = any(row[0].kind == "WAREHOUSE" for row in candidates)
     has_customer_candidates = any(row[0].kind == "CUSTOMER" for row in candidates)
-    if not has_customer_candidates and existing_customers and not customers_with_coordinates:
-        route_status["CUSTOMER"] = "MISSING_COORDINATES"
-        route_message["CUSTOMER"] = (
-            "Existing customer records were found, but none have valid coordinates."
+    if not has_customer_candidates:
+        customer_count_query = select(
+            func.count(Customer.id),
+            func.count(Customer.latitude),
+            func.count(Customer.longitude),
         )
+        if payload.exclude_customer_id:
+            customer_count_query = customer_count_query.where(
+                Customer.id != payload.exclude_customer_id
+            )
+        total_customers, located_latitudes, located_longitudes = (
+            await session.execute(customer_count_query)
+        ).one()
+        located_customers = min(located_latitudes, located_longitudes)
+        if total_customers and not located_customers:
+            route_status["CUSTOMER"] = "MISSING_COORDINATES"
+            route_message["CUSTOMER"] = "Existing customer records have no valid coordinates."
     for kind in ("WAREHOUSE", "CUSTOMER"):
         if any(row[0].kind == kind for row in candidates):
             route_status[kind] = "NO_DRIVING_ROUTE"
 
-    # A fake provider can synthesize distances and durations but has no road
-    # network geometry. Never present its values as a real driving route.
+    # Fake distances have no matching road geometry and must never be shown as
+    # actual driving routes.
     if provider.name == "fake":
-        message = (
-            "Configure ROUTE_PREVIEW_PROVIDER=osrm and OSRM_BASE_URL to calculate "
-            "real road routes."
-        )
+        message = "The configured routing provider cannot supply real road routes. Configure an actual driving-routes provider."
         for kind, has_candidates in (
             ("WAREHOUSE", has_warehouse_candidates),
             ("CUSTOMER", has_customer_candidates),
@@ -129,6 +176,7 @@ async def preview_vehicle_routes(
         return RoutePreviewResponse(
             destination_latitude=payload.latitude,
             destination_longitude=payload.longitude,
+            destination_address=payload.destination_address,
             nearest_warehouse=None,
             nearest_customer=None,
             routes=[],
@@ -144,6 +192,11 @@ async def preview_vehicle_routes(
             legs = await provider.get_driving_distances(
                 [row[1] for row in candidates], destination
             )
+            if len(legs) != len(candidates):
+                raise RoutingProviderError(
+                    "The routing provider returned an incomplete candidate matrix.",
+                    code="PROVIDER_RESPONSE_MISALIGNED",
+                )
         except ProviderError as exc:
             legs = []
             status, message = _route_provider_failure(exc)
@@ -151,12 +204,12 @@ async def preview_vehicle_routes(
                 if any(row[0].kind == kind for row in candidates):
                     route_status[kind] = status
                     route_message[kind] = message
-        for (origin, coordinate, _), leg in zip(candidates, legs):
+        for (origin, coordinate, _, _), leg in zip(candidates, legs):
             if leg is not None:
                 road_ranked.append((origin.model_copy(update={"distance_meters": leg.distance_meters}), coordinate, leg.distance_meters))
 
-    # Keep the nearest road-accessible warehouse and customer, then request
-    # Directions alternatives for each selected origin.
+    # Keep the nearest road-accessible warehouse and customer independently,
+    # then request actual route alternatives for each selected origin.
     selected: list[tuple[PreviewOrigin, Coordinate, int]] = []
     for kind in ("WAREHOUSE", "CUSTOMER"):
         match = next((row for row in sorted(road_ranked, key=lambda row: row[2]) if row[0].kind == kind), None)
@@ -190,8 +243,9 @@ async def preview_vehicle_routes(
                 ),
             ))
     routes.sort(key=lambda route: route.distance_meters)
-    return RoutePreviewResponse(
+    response = RoutePreviewResponse(
         destination_latitude=payload.latitude, destination_longitude=payload.longitude,
+        destination_address=payload.destination_address,
         nearest_warehouse=next((row[0] for row in selected if row[0].kind == "WAREHOUSE"), None),
         nearest_customer=next((row[0] for row in selected if row[0].kind == "CUSTOMER"), None),
         routes=routes,
@@ -199,8 +253,66 @@ async def preview_vehicle_routes(
         customer_route_status=route_status["CUSTOMER"],
         warehouse_route_message=route_message["WAREHOUSE"],
         customer_route_message=route_message["CUSTOMER"],
-        message=("No nearby eligible Warehouse or existing Customer found." if not candidates else None),
+        message=(
+            "No nearby active Warehouse or existing Customer with valid coordinates was found."
+            if not candidates else None
+        ),
     )
+    await _store_route_preview_cache(cache_key, response)
+    return response
+
+
+def _route_preview_cache_key(
+    payload: RoutePreviewRequest,
+    provider_name: str,
+    candidates: list[tuple[PreviewOrigin, Coordinate, float, str]],
+) -> str:
+    snapshot = [
+        (
+            origin.kind, str(origin.id), origin.name, origin.address,
+            round(origin.latitude, 6), round(origin.longitude, 6), updated_at,
+        )
+        for origin, _, _, updated_at in candidates
+    ]
+    fingerprint = hashlib.sha256(
+        json.dumps(snapshot, ensure_ascii=True, separators=(",", ":")).encode()
+    ).hexdigest()[:24]
+    request_key = (
+        f"{provider_name}:{payload.latitude:.6f}:{payload.longitude:.6f}:"
+        f"{payload.destination_address or ''}:{payload.search_radius_km:g}:"
+        f"{payload.candidate_limit_per_type}:{payload.exclude_customer_id or ''}:{fingerprint}"
+    )
+    digest = hashlib.sha256(request_key.encode()).hexdigest()
+    return f"route-preview:v1:{digest}"
+
+
+async def _get_route_preview_cache(key: str) -> RoutePreviewResponse | None:
+    try:
+        cached = await route_cache.get_redis().get(key)
+        if cached:
+            return RoutePreviewResponse.model_validate_json(cached)
+    except Exception as exc:  # noqa: BLE001 - cache outages never break routing
+        logger.warning("route_preview_cache_read_failed", error=type(exc).__name__)
+    return None
+
+
+async def _store_route_preview_cache(key: str, result: RoutePreviewResponse) -> None:
+    # Cache only successful road-route responses. The candidate fingerprint in
+    # the key invalidates entries when an origin is added, moved, or deactivated.
+    stable_statuses = {
+        "CALCULATED_UNVERIFIED", "NO_NEARBY_LOCATION", "NO_DRIVING_ROUTE",
+        "MISSING_COORDINATES", "ROUTE_GEOMETRY_UNAVAILABLE",
+    }
+    if not result.routes or any(
+        route_status not in stable_statuses
+        for route_status in (result.warehouse_route_status, result.customer_route_status)
+    ):
+        return
+    ttl = max(1, min(settings.DEFAULT_ROUTE_CACHE_TTL_SECONDS, 300))
+    try:
+        await route_cache.get_redis().setex(key, ttl, result.model_dump_json())
+    except Exception as exc:  # noqa: BLE001 - cache outages never break routing
+        logger.warning("route_preview_cache_write_failed", error=type(exc).__name__)
 
 
 def _route_provider_failure(exc: ProviderError) -> tuple[str, str]:
@@ -216,7 +328,7 @@ def _route_provider_failure(exc: ProviderError) -> tuple[str, str]:
         return f"{summary} Routing provider response: {message}"
 
     if code == "PROVIDER_NOT_CONFIGURED":
-        return "ROUTING_PROVIDER_NOT_CONFIGURED", with_provider_detail("Configure ROUTE_PREVIEW_PROVIDER=osrm and OSRM_BASE_URL in the backend environment.")
+        return "ROUTING_PROVIDER_NOT_CONFIGURED", with_provider_detail("Configure a real road-routing provider and its backend credentials.")
     if code == "PROVIDER_CONNECT_ERROR":
         return "ROUTE_SERVICE_UNAVAILABLE", message
     if code == "PROVIDER_NO_ROUTE":
@@ -226,7 +338,7 @@ def _route_provider_failure(exc: ProviderError) -> tuple[str, str]:
     if code in ("PROVIDER_RESPONSE_MISALIGNED", "PROVIDER_INVALID_RESPONSE"):
         return "ROUTING_INVALID_RESPONSE", with_provider_detail("The routing service returned an invalid response.")
     if code in ("PROVIDER_QUOTA_EXCEEDED", "ROUTING_RATE_LIMITED"):
-        return "ROUTE_SERVICE_UNAVAILABLE", with_provider_detail("The routing service is rate limited. Please retry shortly.")
+        return "ROUTE_SERVICE_UNAVAILABLE", with_provider_detail("The routing service quota or rate limit was reached. Please retry shortly.")
     if code == "ROUTING_CIRCUIT_OPEN":
         return "ROUTE_SERVICE_UNAVAILABLE", message
     if code == "ROUTING_TIMEOUT":

@@ -1,12 +1,16 @@
 import { useEffect, useRef, useState } from 'react'
 
-import type { MapOperations, ServiceabilityResult } from '../types/api'
+import type { MapOperations, RouteOriginKind, RoutePreviewResult, ServiceabilityResult } from '../types/api'
 import { STATUS_MARKER_COLOR } from './StatusBadge'
 import { decodePolyline } from '../lib/polyline'
 
 interface Props {
   data: MapOperations | null
   result: ServiceabilityResult | null
+  routePreview?: RoutePreviewResult | null
+  selectedRoutes?: Record<RouteOriginKind, string | null>
+  routeVisibility?: Record<RouteOriginKind, boolean>
+  highlightedRouteId?: string | null
   /** The point currently being assessed, which the operator can drag. */
   draftPoint: { latitude: number; longitude: number } | null
   draggable: boolean
@@ -82,6 +86,10 @@ function escapeHtml(value: string): string {
 export function OperationsMap({
   data,
   result,
+  routePreview = null,
+  selectedRoutes = { WAREHOUSE: null, CUSTOMER: null },
+  routeVisibility = { WAREHOUSE: true, CUSTOMER: true },
+  highlightedRouteId = null,
   draftPoint,
   draggable,
   onDragEnd,
@@ -100,9 +108,12 @@ export function OperationsMap({
   const initializationRef = useRef(false)
   const staticMarkersRef = useRef<MarkerEntry[]>([])
   const draftMarkerRef = useRef<google.maps.Marker | null>(null)
+  const draftInfoRef = useRef<google.maps.InfoWindow | null>(null)
   const editorMarkersRef = useRef<Map<string, google.maps.Marker>>(new Map())
   const focusMarkersRef = useRef<MarkerEntry[]>([])
   const focusLinesRef = useRef<google.maps.Polyline[]>([])
+  const routeMarkersRef = useRef<MarkerEntry[]>([])
+  const routeLinesRef = useRef<google.maps.Polyline[]>([])
   const onMapClickRef = useRef(onMapClick)
   const onDragEndRef = useRef(onDragEnd)
   const onEditorDragEndRef = useRef(onEditorDragEnd)
@@ -176,12 +187,18 @@ export function OperationsMap({
       for (const entry of staticMarkersRef.current) entry.marker.setMap(null)
       for (const entry of focusMarkersRef.current) entry.marker.setMap(null)
       for (const line of focusLinesRef.current) line.setMap(null)
+      for (const entry of routeMarkersRef.current) entry.marker.setMap(null)
+      for (const line of routeLinesRef.current) line.setMap(null)
       draftMarkerRef.current?.setMap(null)
+      draftInfoRef.current?.close()
       for (const marker of editorMarkers.values()) marker.setMap(null)
       staticMarkersRef.current = []
       focusMarkersRef.current = []
       focusLinesRef.current = []
+      routeMarkersRef.current = []
+      routeLinesRef.current = []
       draftMarkerRef.current = null
+      draftInfoRef.current = null
       editorMarkers.clear()
       mapRef.current = null
       initializationRef.current = false
@@ -249,6 +266,8 @@ export function OperationsMap({
     if (!draftPoint) {
       draftMarkerRef.current?.setMap(null)
       draftMarkerRef.current = null
+      draftInfoRef.current?.close()
+      draftInfoRef.current = null
       return
     }
     const position = { lat: draftPoint.latitude, lng: draftPoint.longitude }
@@ -265,15 +284,21 @@ export function OperationsMap({
         const point = marker.getPosition()
         if (point) onDragEndRef.current?.(Number(point.lat().toFixed(6)), Number(point.lng().toFixed(6)))
       })
+      const info = new window.google!.maps.InfoWindow({ content: 'New customer location' })
+      marker.addListener('click', () => info.open({ map, anchor: marker }))
       draftMarkerRef.current = marker
+      draftInfoRef.current = info
     } else {
       draftMarkerRef.current.setMap(map)
       draftMarkerRef.current.setPosition(position)
       draftMarkerRef.current.setDraggable(draggable)
     }
+    draftInfoRef.current?.setContent(
+      `<strong>${escapeHtml(routePreview?.destinationAddress ?? 'New customer location')}</strong><br/>${draftPoint.latitude.toFixed(6)}, ${draftPoint.longitude.toFixed(6)}`,
+    )
     map.panTo(position)
     if ((map.getZoom() ?? 0) < 16) map.setZoom(16)
-  }, [draftPoint, draggable, mapReady])
+  }, [draftPoint, draggable, mapReady, routePreview?.destinationAddress])
 
   useEffect(() => {
     const map = mapRef.current
@@ -362,6 +387,111 @@ export function OperationsMap({
     }
   }, [result, draftPoint, mapReady])
 
+  useEffect(() => {
+    const map = mapRef.current
+    for (const entry of routeMarkersRef.current) entry.marker.setMap(null)
+    for (const line of routeLinesRef.current) line.setMap(null)
+    routeMarkersRef.current = []
+    routeLinesRef.current = []
+    if (!map || !routePreview) return
+
+    const origins: { kind: RouteOriginKind; origin: NonNullable<RoutePreviewResult['nearestWarehouse']>; color: string; label: string }[] = []
+    if (routePreview.nearestWarehouse) origins.push({ kind: 'WAREHOUSE', origin: routePreview.nearestWarehouse, color: '#2563EB', label: 'W' })
+    if (routePreview.nearestCustomer) origins.push({ kind: 'CUSTOMER', origin: routePreview.nearestCustomer, color: '#E11D48', label: 'C' })
+    for (const item of origins) {
+      const marker = new window.google!.maps.Marker({
+        map,
+        position: { lat: item.origin.latitude, lng: item.origin.longitude },
+        title: `${item.kind === 'WAREHOUSE' ? 'Warehouse' : 'Existing customer'} route origin: ${item.origin.name}`,
+        zIndex: 940,
+        icon: markerIcon(item.color, 10),
+        label: { text: item.label, color: '#ffffff', fontWeight: '700', fontSize: '10px' },
+      })
+      const info = new window.google!.maps.InfoWindow({
+        content: `<strong>${escapeHtml(item.origin.name)}</strong><br/>${item.kind === 'WAREHOUSE' ? 'Warehouse' : 'Existing customer'} route start<br/>${escapeHtml(item.origin.address ?? '')}`,
+      })
+      marker.addListener('click', () => info.open({ map, anchor: marker }))
+      routeMarkersRef.current.push({ marker, info })
+    }
+
+    for (const kind of ['WAREHOUSE', 'CUSTOMER'] as const) {
+      if (!routeVisibility[kind]) continue
+      const route = routePreview.routes.find((item) => item.id === selectedRoutes[kind])
+      if (!route?.geometry || route.geometryFormat !== 'encoded_polyline_5') continue
+      const decoded = decodePolyline(route.geometry)
+      if (decoded.length < 2) continue
+      const path = decoded.map(([lat, lng]) => ({ lat, lng }))
+      const color = kind === 'WAREHOUSE' ? '#2563EB' : '#E11D48'
+      const selectedWeight = route.id === highlightedRouteId ? 9 : kind === 'WAREHOUSE' ? 8 : 6
+      routeLinesRef.current.push(new window.google!.maps.Polyline({
+        map,
+        path,
+        strokeColor: '#ffffff',
+        strokeWeight: selectedWeight + 4,
+        strokeOpacity: 0.92,
+        clickable: false,
+        zIndex: kind === 'WAREHOUSE' ? 20 : 21,
+      }))
+      routeLinesRef.current.push(new window.google!.maps.Polyline({
+        map,
+        path,
+        strokeColor: color,
+        strokeWeight: selectedWeight,
+        strokeOpacity: 1,
+        clickable: false,
+        zIndex: kind === 'WAREHOUSE' ? 22 : 23,
+      }))
+    }
+  }, [routePreview, selectedRoutes, routeVisibility, highlightedRouteId, mapReady])
+
+  useEffect(() => {
+    const map = mapRef.current
+    if (!map || !routePreview) return
+    const bounds = new window.google!.maps.LatLngBounds()
+    let hasPoint = false
+    if (draftPoint) {
+      bounds.extend({ lat: draftPoint.latitude, lng: draftPoint.longitude })
+      hasPoint = true
+    }
+    for (const kind of ['WAREHOUSE', 'CUSTOMER'] as const) {
+      if (!routeVisibility[kind]) continue
+      const route = routePreview.routes.find((item) => item.id === selectedRoutes[kind])
+      if (!route?.geometry || route.geometryFormat !== 'encoded_polyline_5') continue
+      for (const [lat, lng] of decodePolyline(route.geometry)) {
+        bounds.extend({ lat, lng })
+        hasPoint = true
+      }
+    }
+    if (hasPoint) map.fitBounds(bounds, 54)
+  }, [routePreview, selectedRoutes, routeVisibility, draftPoint, mapReady])
+
+  const fitPreviewRoutes = (onlyKind: RouteOriginKind | 'ALL') => {
+    const map = mapRef.current
+    if (!map || !routePreview) return
+    const bounds = new window.google!.maps.LatLngBounds()
+    let hasPoint = false
+    if (draftPoint) {
+      bounds.extend({ lat: draftPoint.latitude, lng: draftPoint.longitude })
+      hasPoint = true
+    }
+    const kinds = onlyKind === 'ALL' ? ['WAREHOUSE', 'CUSTOMER'] as const : [onlyKind]
+    for (const kind of kinds) {
+      if (onlyKind === 'ALL' && !routeVisibility[kind]) continue
+      const route = routePreview.routes.find((item) => item.id === selectedRoutes[kind])
+      if (!route?.geometry || route.geometryFormat !== 'encoded_polyline_5') continue
+      for (const [lat, lng] of decodePolyline(route.geometry)) {
+        bounds.extend({ lat, lng })
+        hasPoint = true
+      }
+    }
+    if (hasPoint) map.fitBounds(bounds, 54)
+  }
+
+  const hasRouteGeometry = (kind: RouteOriginKind) => {
+    const route = routePreview?.routes.find((item) => item.id === selectedRoutes[kind])
+    return Boolean(route?.geometry && route.geometryFormat === 'encoded_polyline_5')
+  }
+
   const serviceLocations = data?.serviceLocations.filter(
     (location) => location.latitude != null && location.longitude != null,
   ) ?? []
@@ -392,6 +522,13 @@ export function OperationsMap({
         </div>
       )}
       <div ref={containerRef} className="map-canvas" />
+      {routePreview && (
+        <div className="map-route-controls" aria-label="Route map controls">
+          <button type="button" className="btn btn--secondary btn--sm" onClick={() => fitPreviewRoutes('ALL')}>Fit visible routes</button>
+          <button type="button" className="btn btn--secondary btn--sm" disabled={!hasRouteGeometry('WAREHOUSE')} onClick={() => fitPreviewRoutes('WAREHOUSE')}>Zoom Warehouse route</button>
+          <button type="button" className="btn btn--secondary btn--sm" disabled={!hasRouteGeometry('CUSTOMER')} onClick={() => fitPreviewRoutes('CUSTOMER')}>Zoom Customer route</button>
+        </div>
+      )}
       {mapError && <div className="map-error" role="alert">{mapError}</div>}
       <div className="map-legend">
         <div className="map-legend__title">Legend</div>

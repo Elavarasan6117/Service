@@ -90,6 +90,8 @@ declare global {
       constructor(options?: InfoWindowOptions)
       open(options?: { map?: Map; anchor?: Marker }): void
       setPosition(position: LatLng): void
+      setContent(content: string): void
+      close(): void
     }
 
     interface PolylineOptions {
@@ -99,6 +101,7 @@ declare global {
       strokeOpacity?: number
       strokeWeight?: number
       clickable?: boolean
+      zIndex?: number
       icons?: { icon: { path: string; strokeOpacity?: number; scale?: number }; offset?: string; repeat?: string }[]
     }
 

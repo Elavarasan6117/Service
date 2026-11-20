@@ -260,6 +260,8 @@ class RoutePreviewRequest(CamelModel):
     longitude: float = Field(..., ge=-180, le=180)
     exclude_customer_id: uuid.UUID | None = None
     search_radius_km: float = Field(25, ge=1, le=50)
+    candidate_limit_per_type: int = Field(12, ge=1, le=25)
+    destination_address: str | None = Field(None, max_length=2000)
 
 
 class PreviewOrigin(CamelModel):
@@ -286,6 +288,7 @@ class PreviewRoute(CamelModel):
 class RoutePreviewResponse(CamelModel):
     destination_latitude: float
     destination_longitude: float
+    destination_address: str | None = None
     nearest_warehouse: PreviewOrigin | None
     nearest_customer: PreviewOrigin | None
     routes: list[PreviewRoute]

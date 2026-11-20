@@ -1,12 +1,10 @@
 import type { ServiceabilityResult } from '../types/api'
-import { googleMapsDrivingDirectionsUrl } from '../lib/googleMapsDirections'
 import { STATUS_PRESENTATION } from './StatusBadge'
 
 interface Props {
   result: ServiceabilityResult | null
   loading: boolean
   onRetry?: () => void
-  destination?: { latitude: number | null; longitude: number | null; address?: string | null } | null
 }
 
 const km = (metres: number) => (metres / 1000).toFixed(2)
@@ -18,7 +16,7 @@ const km = (metres: number) => (metres / 1000).toFixed(2)
  * distance comparison of its own -- the backend is the source of truth for
  * serviceability, and the frontend renders its decision (brief section 33).
  */
-export function ServiceabilityResultPanel({ result, loading, onRetry, destination }: Props) {
+export function ServiceabilityResultPanel({ result, loading, onRetry }: Props) {
   if (loading) {
     return (
       <div className="result-banner result-banner--info">
@@ -49,9 +47,6 @@ export function ServiceabilityResultPanel({ result, loading, onRetry, destinatio
   const presentation = STATUS_PRESENTATION[result.status] ?? STATUS_PRESENTATION.PENDING
   const nearest = result.nearestServiceLocation
   const decided = result.status === 'AVAILABLE' || result.status === 'NOT_AVAILABLE'
-  const directionsUrl = decided && nearest && destination
-    ? googleMapsDrivingDirectionsUrl(nearest, destination)
-    : null
 
   return (
     <div className={`result-banner result-banner--${presentation.tone}`}>
@@ -113,20 +108,6 @@ export function ServiceabilityResultPanel({ result, loading, onRetry, destinatio
           {result.reason && (
             <p style={{ margin: '12px 0 0', fontSize: 12.5 }}>{result.reason}</p>
           )}
-          {directionsUrl ? (
-            <a className="btn directions-link" href={directionsUrl} target="_blank" rel="noopener noreferrer">
-              <svg aria-hidden="true" viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                <path d="M12 21s7-6.2 7-12a7 7 0 1 0-14 0c0 5.8 7 12 7 12Z" />
-                <circle cx="12" cy="9" r="2.3" />
-                <path d="M8 16h8" />
-              </svg>
-              Get Directions <span className="directions-link__provider">Google Maps</span>
-            </a>
-          ) : decided ? (
-            <p className="subtle directions-link__error" role="status">
-              Directions are unavailable because the service location coordinates or customer destination are missing or invalid.
-            </p>
-          ) : null}
         </>
       ) : (
         <div className="result-grid result-grid--full">

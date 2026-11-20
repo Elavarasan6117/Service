@@ -1,9 +1,10 @@
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { Link } from 'react-router-dom'
 
 import { api, ApiError } from '../api/client'
 import { CustomerForm } from '../components/CustomerForm'
 import { OperationsMap } from '../components/OperationsMap'
+import { RoutePreviewPanel } from '../components/RoutePreviewPanel'
 import { QuickAddLocationForm } from '../components/QuickAddLocationForm'
 import { ServiceabilityResultPanel } from '../components/ServiceabilityResultPanel'
 import { StatusBadge } from '../components/StatusBadge'
@@ -14,6 +15,8 @@ import type {
   MapOperations,
   ServiceabilityCheck,
   ServiceabilityResult,
+  RouteOriginKind,
+  RoutePreviewResult,
 } from '../types/api'
 
 interface Props {
@@ -71,6 +74,87 @@ export function DashboardPage({
     longitude: number
     address: string
   } | null>(null)
+  const [routePreview, setRoutePreview] = useState<RoutePreviewResult | null>(null)
+  const [routeLoading, setRouteLoading] = useState(false)
+  const [routeError, setRouteError] = useState<string | null>(null)
+  const [searchRadiusKm, setSearchRadiusKm] = useState(25)
+  const [candidateLimitPerType, setCandidateLimitPerType] = useState(12)
+  const [routeVisibility, setRouteVisibility] = useState({ WAREHOUSE: true, CUSTOMER: true })
+  const [selectedRoutes, setSelectedRoutes] = useState<Record<RouteOriginKind, string | null>>({ WAREHOUSE: null, CUSTOMER: null })
+  const [highlightedRouteId, setHighlightedRouteId] = useState<string | null>(null)
+  const [routeTargetCustomerId, setRouteTargetCustomerId] = useState<string | null>(null)
+  const [routeRefreshRevision, setRouteRefreshRevision] = useState(0)
+  const routeRequestId = useRef(0)
+  const destinationLatitude = draftPoint?.latitude ?? null
+  const destinationLongitude = draftPoint?.longitude ?? null
+  const destinationAddress = activeCustomer?.formattedAddress ?? activeCustomer?.address ?? selectedLocation?.address ?? null
+  const destinationAddressRef = useRef(destinationAddress)
+  destinationAddressRef.current = destinationAddress
+
+  useEffect(() => {
+    setRoutePreview((current) => current ? { ...current, destinationAddress } : current)
+  }, [destinationAddress])
+
+  useEffect(() => {
+    const requestId = ++routeRequestId.current
+    if (destinationLatitude == null || destinationLongitude == null) {
+      setRoutePreview(null)
+      setRouteError(null)
+      setRouteLoading(false)
+      return
+    }
+
+    setRoutePreview(null)
+    setRouteError(null)
+    setRouteLoading(true)
+    let controller: AbortController | null = null
+    const timer = window.setTimeout(async () => {
+      controller = new AbortController()
+      try {
+        const response = await api.previewRoutes(
+          destinationLatitude,
+          destinationLongitude,
+          routeTargetCustomerId,
+          searchRadiusKm,
+          candidateLimitPerType,
+          destinationAddressRef.current,
+          controller.signal,
+        )
+        if (routeRequestId.current === requestId) {
+          setRoutePreview({ ...response, destinationAddress: destinationAddressRef.current })
+        }
+      } catch (exception) {
+        if (routeRequestId.current === requestId && !controller.signal.aborted) {
+          setRoutePreview(null)
+          setRouteError(exception instanceof ApiError ? exception.message : 'Unable to calculate driving routes. Please retry.')
+        }
+      } finally {
+        if (routeRequestId.current === requestId) setRouteLoading(false)
+      }
+    }, 500)
+    return () => {
+      window.clearTimeout(timer)
+      controller?.abort()
+    }
+  }, [destinationLatitude, destinationLongitude, routeTargetCustomerId, searchRadiusKm, candidateLimitPerType, routeRefreshRevision])
+
+  useEffect(() => {
+    if (!routePreview) {
+      setSelectedRoutes({ WAREHOUSE: null, CUSTOMER: null })
+      setHighlightedRouteId(null)
+      return
+    }
+    setSelectedRoutes((current) => {
+      const choose = (kind: RouteOriginKind) => {
+        const routes = routePreview.routes.filter((route) => route.origin.kind === kind)
+        if (routes.some((route) => route.id === current[kind])) return current[kind]
+        let shortest = routes[0]
+        for (const route of routes.slice(1)) if (route.distanceMeters < shortest.distanceMeters) shortest = route
+        return shortest?.id ?? null
+      }
+      return { WAREHOUSE: choose('WAREHOUSE'), CUSTOMER: choose('CUSTOMER') }
+    })
+  }, [routePreview])
   const refresh = useCallback(async () => {
     try {
       const [map, dashboardMetrics, history] = await Promise.all([
@@ -114,6 +198,7 @@ export function DashboardPage({
     serviceability: ServiceabilityResult | null
   }) => {
     setActiveCustomer(response.customer)
+    setRouteTargetCustomerId(response.customer.id)
     setResult(response.serviceability)
     if (response.customer.latitude != null && response.customer.longitude != null) {
       setDraftPoint({
@@ -181,6 +266,7 @@ export function DashboardPage({
       await api.deleteCheck(id)
       if (deletedCheck?.customerId && deletedCheck.customerId === activeCustomer?.id) {
         setActiveCustomer(null)
+        setRouteTargetCustomerId(null)
         setDraftPoint(null)
         setFormPoint(null)
         setSelectedLocation(null)
@@ -198,11 +284,13 @@ export function DashboardPage({
       setDraftPoint({ latitude, longitude })
       setResult(null)
       if (activeCustomer && !selectingNewCustomer) {
+        setRouteTargetCustomerId(activeCustomer.id)
         setPendingMove(true)
         return
       }
 
       setActiveCustomer(null)
+      setRouteTargetCustomerId(null)
       setPendingMove(false)
       setFormPoint({ latitude, longitude })
       // Show the selected point immediately, even if reverse geocoding is
@@ -242,6 +330,7 @@ export function DashboardPage({
                 onCreated={handleCreated}
                 onPreviewResult={setResult}
                 onDraftPoint={(point) => {
+                  setRouteTargetCustomerId(null)
                   setDraftPoint(point)
                   setFormPoint(point)
                   if (point === null) {
@@ -281,10 +370,6 @@ export function DashboardPage({
               result={result}
               loading={checking}
               onRetry={retryCheck}
-              destination={draftPoint ? {
-                ...draftPoint,
-                address: activeCustomer?.formattedAddress ?? activeCustomer?.address ?? selectedLocation?.address,
-              } : null}
             />
             {pendingMove && activeCustomer && canAdjustLocation && (
               <div className="row" style={{ marginTop: 13 }}>
@@ -359,6 +444,10 @@ export function DashboardPage({
               data={mapData}
               result={result}
               draftPoint={draftPoint}
+              routePreview={routePreview}
+              selectedRoutes={selectedRoutes}
+              routeVisibility={routeVisibility}
+              highlightedRouteId={highlightedRouteId}
               draggable={canAdjustLocation}
               onDragEnd={(latitude, longitude) => {
                 handleMapLocation(latitude, longitude)
@@ -381,6 +470,28 @@ export function DashboardPage({
               onEditorDragEnd={(id, latitude, longitude) => {
                 if (id === 'warehouse-draft') setWarehouseDraftPoint({ latitude, longitude })
                 else if (id === 'service-draft') setServiceDraftPoint({ latitude, longitude })
+              }}
+            />
+            <RoutePreviewPanel
+              result={routePreview}
+              loading={routeLoading}
+              error={routeError}
+              searchRadiusKm={searchRadiusKm}
+              candidateLimitPerType={candidateLimitPerType}
+              visibility={routeVisibility}
+              selectedRoutes={selectedRoutes}
+              highlightedRouteId={highlightedRouteId}
+              onSearchRadiusChange={setSearchRadiusKm}
+              onCandidateLimitChange={setCandidateLimitPerType}
+              onVisibilityChange={(kind, visible) => setRouteVisibility((current) => ({ ...current, [kind]: visible }))}
+              onRouteChange={(kind, routeId) => setSelectedRoutes((current) => ({ ...current, [kind]: routeId }))}
+              onHighlight={setHighlightedRouteId}
+              onRefresh={() => setRouteRefreshRevision((revision) => revision + 1)}
+              onClear={() => {
+                routeRequestId.current += 1
+                setRoutePreview(null)
+                setRouteError(null)
+                setRouteLoading(false)
               }}
             />
           </div>
