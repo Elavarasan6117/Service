@@ -91,6 +91,131 @@ def test_route_preview_error_preserves_safe_provider_detail():
     assert secret not in message
 
 
+def test_route_preview_maps_google_permission_failures_to_actionable_errors():
+    status_code, message = _route_provider_failure(RoutingProviderError(
+        "Google Routes/Maps API returned HTTP 403 (PERMISSION_DENIED): API key not valid. Please pass a valid API key.",
+        code="PROVIDER_REQUEST_DENIED",
+    ))
+    assert status_code == "ROUTING_API_KEY_INVALID"
+    assert "server-side key" in message
+    assert "HTTP 403" in message
+
+
+async def test_route_preview_keeps_origins_and_routes_independent_when_matrix_is_denied(
+    client, ops_user, warehouse, session, monkeypatch
+):
+    customer = Customer(
+        customer_code="C-ROUTE-MATRIX-DENIED", customer_name="Eligible customer",
+        address="Test Road, Chennai", city="Chennai",
+        latitude=Decimal("13.0795000"), longitude=Decimal("80.2680000"),
+    )
+    session.add(customer)
+    await session.commit()
+
+    class MatrixDeniedButRoutesAvailable:
+        name = "google_maps"
+
+        async def get_driving_distances(self, origins, destination):
+            raise RoutingProviderError(
+                "Google Routes API returned HTTP 403 (PERMISSION_DENIED): matrix permission denied.",
+                code="PROVIDER_REQUEST_DENIED",
+            )
+
+        async def get_driving_routes(self, origin, destination):
+            is_warehouse = origin.latitude == float(warehouse.latitude)
+            return [RouteDetail(
+                distance_meters=3100 if is_warehouse else 1700,
+                duration_seconds=420 if is_warehouse else 240,
+                geometry="_p~iF~ps|U_ulLnnqC_mqNvxq`@",
+                geometry_format="encoded_polyline_5",
+                provider=self.name,
+            )]
+
+    monkeypatch.setattr(
+        "app.api.v1.map_dashboard.get_routing_provider",
+        lambda: MatrixDeniedButRoutesAvailable(),
+    )
+    response = await client.post(
+        "/api/v1/routes/preview",
+        headers=auth_headers(ops_user),
+        json={"latitude": 13.08, "longitude": 80.27},
+    )
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["nearestWarehouse"]["name"] == warehouse.warehouse_name
+    assert body["nearestCustomer"]["name"] == customer.customer_name
+    assert body["nearestWarehouse"]["selectionBasis"] == "GEOGRAPHIC_FALLBACK"
+    assert body["nearestCustomer"]["selectionBasis"] == "GEOGRAPHIC_FALLBACK"
+    assert {route["origin"]["kind"] for route in body["routes"]} == {"WAREHOUSE", "CUSTOMER"}
+    assert {route["distanceMeters"] for route in body["routes"]} == {1700, 3100}
+    assert {route["durationSeconds"] for route in body["routes"]} == {240, 420}
+    assert body["warehouseRouteStatus"] == body["customerRouteStatus"] == "CALCULATED_UNVERIFIED"
+    assert "road-distance ranking was unavailable" in body["warehouseRouteMessage"]
+
+
+async def test_route_preview_retains_starting_locations_on_google_403(
+    client, ops_user, warehouse, session, monkeypatch
+):
+    customer = Customer(
+        customer_code="C-ROUTE-403", customer_name="403 customer origin",
+        address="Test Road, Chennai", city="Chennai",
+        latitude=Decimal("13.0795000"), longitude=Decimal("80.2680000"),
+    )
+    session.add(customer)
+    await session.commit()
+
+    class DeniedProvider:
+        name = "google_maps"
+
+        @staticmethod
+        def _denied():
+            return RoutingProviderError(
+                "Google Routes API returned HTTP 403 (PERMISSION_DENIED): API key not valid.",
+                code="PROVIDER_REQUEST_DENIED",
+            )
+
+        async def get_driving_distances(self, origins, destination):
+            raise self._denied()
+
+        async def get_driving_routes(self, origin, destination):
+            raise self._denied()
+
+    monkeypatch.setattr(
+        "app.api.v1.map_dashboard.get_routing_provider",
+        lambda: DeniedProvider(),
+    )
+    response = await client.post(
+        "/api/v1/routes/preview",
+        headers=auth_headers(ops_user),
+        json={"latitude": 13.08, "longitude": 80.27},
+    )
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["nearestWarehouse"]["name"] == warehouse.warehouse_name
+    assert body["nearestCustomer"]["name"] == customer.customer_name
+    assert body["routes"] == []
+    assert body["warehouseRouteStatus"] == "ROUTING_API_KEY_INVALID"
+    assert body["customerRouteStatus"] == "ROUTING_API_KEY_INVALID"
+    assert "HTTP 403" in body["warehouseRouteMessage"]
+    assert "HTTP 403" in body["customerRouteMessage"]
+
+
+async def test_route_preview_explains_missing_origin_records(client, ops_user):
+    response = await client.post(
+        "/api/v1/routes/preview",
+        headers=auth_headers(ops_user),
+        json={"latitude": 13.08, "longitude": 80.27},
+    )
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["nearestWarehouse"] is None
+    assert body["nearestCustomer"] is None
+    assert body["warehouseRouteStatus"] == "NO_ACTIVE_WAREHOUSE"
+    assert body["customerRouteStatus"] == "NO_ELIGIBLE_EXISTING_CUSTOMER"
+    assert "No active Warehouse" in body["warehouseRouteMessage"]
+    assert "No other existing Customer" in body["customerRouteMessage"]
+
+
 async def test_route_preview_uses_active_warehouse_and_returns_road_route(
     client, ops_user, warehouse, monkeypatch
 ):
@@ -135,7 +260,7 @@ async def test_route_preview_uses_active_warehouse_and_returns_road_route(
     assert body["routes"][0]["availability"] == "CALCULATED_UNVERIFIED"
     assert body["routes"][0]["geometry"] == "_p~iF~ps|U_ulLnnqC_mqNvxq`@"
     assert body["warehouseRouteStatus"] == "CALCULATED_UNVERIFIED"
-    assert body["customerRouteStatus"] == "NO_NEARBY_LOCATION"
+    assert body["customerRouteStatus"] == "NO_ELIGIBLE_EXISTING_CUSTOMER"
 
 
 async def test_route_preview_keeps_warehouse_route_when_customer_route_fails(

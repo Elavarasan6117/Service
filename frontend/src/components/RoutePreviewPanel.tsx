@@ -26,9 +26,16 @@ const statusText: Record<string, string> = {
   ROUTE_GEOMETRY_UNAVAILABLE: 'Road distance is available, but this route has no drawable geometry.',
   REAL_ROUTING_PROVIDER_REQUIRED: 'A real driving-routes provider is required. Synthetic routes are never shown.',
   ROUTING_PROVIDER_NOT_CONFIGURED: 'Configure the backend road-routing provider and its credentials.',
+  ROUTING_API_KEY_INVALID: 'Google did not accept the backend API key. Verify the key and its project restrictions.',
+  ROUTING_API_NOT_ENABLED: 'Enable Routes API in the Google Cloud project used by the backend API key.',
+  ROUTING_BILLING_REQUIRED: 'Google Cloud billing must be active for Routes API requests.',
+  ROUTING_KEY_RESTRICTION_MISMATCH: 'The backend needs a server-side Google key. A browser referrer-restricted key will be rejected.',
+  ROUTING_PERMISSION_DENIED: 'Google denied Routes API access. Check billing, API enablement and server key restrictions.',
   ROUTING_INVALID_REQUEST: 'The routing provider rejected the coordinates or request.',
   ROUTING_INVALID_RESPONSE: 'The routing provider returned an invalid response.',
   NO_NEARBY_LOCATION: 'No eligible origin was found within the selected search radius.',
+  NO_ACTIVE_WAREHOUSE: 'No active warehouse with valid coordinates is configured.',
+  NO_ELIGIBLE_EXISTING_CUSTOMER: 'No other customer with valid coordinates is available as a route origin.',
   MISSING_COORDINATES: 'Existing customer records were found, but none have valid coordinates.',
   NO_DRIVING_ROUTE: 'No four-wheeler driving route is available for the selected origin.',
   ROUTE_SERVICE_UNAVAILABLE: 'The routing provider is temporarily unavailable. Please retry.',
@@ -193,12 +200,12 @@ function RouteCard({
         )}
       </header>
       <dl>
-        <dt>Starting location</dt><dd>{origin?.name ?? 'None found'}{origin?.address ? ` · ${origin.address}` : ''}</dd>
+        <dt>Starting location</dt><dd>{origin?.name ?? 'None found'}{origin?.address ? ` · ${origin.address}` : ''}{origin?.selectionBasis === 'GEOGRAPHIC_FALLBACK' ? ' · closest by map distance; road ranking unavailable' : ''}</dd>
         <dt>Destination</dt><dd>{destination.destinationAddress || `${destination.destinationLatitude.toFixed(6)}, ${destination.destinationLongitude.toFixed(6)}`}</dd>
-        <dt>Road distance</dt><dd>{selected ? `${(selected.distanceMeters / 1000).toFixed(2)} km` : '—'}</dd>
-        <dt>Estimated driving time</dt><dd>{selected?.durationSeconds != null ? `${Math.max(1, Math.round(selected.durationSeconds / 60))} min` : '—'}</dd>
+        <dt>Road distance</dt><dd>{selected ? `${(selected.distanceMeters / 1000).toFixed(2)} km` : origin?.distanceMeters != null ? `${(origin.distanceMeters / 1000).toFixed(2)} km` : '—'}</dd>
+        <dt>Estimated driving time</dt><dd>{selected?.durationSeconds != null ? `${Math.max(1, Math.round(selected.durationSeconds / 60))} min` : origin?.durationSeconds != null ? `${Math.max(1, Math.round(origin.durationSeconds / 60))} min` : '—'}</dd>
         <dt>Selected route type</dt><dd>{selected ? selectedType : '—'}</dd>
-        <dt>Route status</dt><dd>{message ?? statusText[normalizedStatus] ?? normalizedStatus}</dd>
+        <dt>Route status</dt><dd>{statusText[normalizedStatus] ?? normalizedStatus}{message ? ` · ${message}` : ''}</dd>
       </dl>
       {routes.length > 0 && (
         <>

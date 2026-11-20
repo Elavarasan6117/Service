@@ -30,7 +30,7 @@ Each has its own `.env`, its own database, and its own Google Maps API key with 
 4. Set a **daily quota cap** on each API. This is the only hard stop against a runaway loop turning into an invoice.
 5. Set a billing budget alert at your expected monthly spend.
 
-The server key is a credential: keep it in the backend environment, never commit it, and never place it in frontend variables. The separate browser key is necessarily public in the frontend bundle and must remain restricted as described above.
+The server key is a credential: keep it in the backend environment, never commit it, and never place it in frontend variables. Do not apply HTTP-referrer restrictions to this key: Render calls Google from the backend, not from the user's browser. If Render has no stable outbound IP allowlist, restrict the key by API only and enable only the required server APIs. The separate browser key is necessarily public in the frontend bundle and must remain restricted as described above.
 
 ### 1.3 Configuration
 
@@ -54,16 +54,16 @@ Edit `.env` and set, at minimum:
 | `FORCE_HTTPS` | `true` |
 | `SECRET_KEY` | the generated 64-char string |
 | `POSTGRES_PASSWORD` | the generated password |
-| `GOOGLE_MAPS_API_KEY` | the restricted production key |
+| `GOOGLE_MAPS_API_KEY` | server-side key restricted to Routes API, Geocoding API and Places API used by the backend |
 | `VITE_GOOGLE_MAPS_API_KEY` | browser key restricted to the deployed hostname and Maps JavaScript API |
-| `ROUTE_PREVIEW_PROVIDER` | `osrm` |
-| `OSRM_BASE_URL` | Optional for dashboard Google Maps directions links; required only for OSRM-backed serviceability routing or the legacy route-preview API. Use a private endpoint, never the public demo server. |
+| `ROUTING_PROVIDER` | `google_maps` for Google road distance and route geometry |
+| `ROUTE_PREVIEW_PROVIDER` / `OSRM_BASE_URL` | Not used by the current route comparison flow. Keep existing values unchanged unless OSRM is separately configured for another feature. |
 | `BOOTSTRAP_ADMIN_PASSWORD` | a strong password, changed after first login |
 | `CORS_ORIGINS` / `TRUSTED_HOSTS` | the real hostname |
 
 The application **refuses to start** in production if `DEBUG` is on, docs are enabled, HTTPS is not forced, the secret key is short, the fake provider is selected, or the database password is a known default. That check is in `app/core/config.py`; if startup fails, read the message — it names every problem at once.
 
-The dashboard's Get Directions action opens Google Maps with driving mode and the nearest eligible service location and customer coordinates. It does not affect backend distances or serviceability decisions. The legacy `/api/v1/routes/preview` endpoint remains available and continues to need its configured provider if called directly. No OSRM server is required for the dashboard directions-link flow.
+The dashboard calls `POST /api/v1/routes/preview`. The backend ranks active, coordinate-valid Warehouses and other coordinate-valid Customers by Routes API road distance, then requests `computeRoutes` independently for each selected origin to obtain distance, duration and encoded road geometry. Keep `GOOGLE_MAPS_API_KEY` on the backend only; use a separate HTTP-referrer-restricted key for `VITE_GOOGLE_MAPS_API_KEY`. A server key restricted to browser referrers will be rejected by Render.
 
 ### 1.4 TLS
 
@@ -204,7 +204,7 @@ Do not tick a box you have not personally verified.
 
 - [ ] Production database backed up, and a restore rehearsed at least once.
 - [ ] `.env` complete, `chmod 600`, not in git.
-- [ ] Google API key restricted by IP and by API, with daily quota caps.
+- [ ] Backend Google key is server-side and restricted to required APIs; use IP restriction only when Render outbound IPs are stable. Browser key is restricted by referrer and Maps JavaScript API.
 - [ ] Billing budget alert configured.
 - [ ] Migrations applied; spatial indexes confirmed present (3.3).
 - [ ] Warehouse record created with verified coordinates.
@@ -212,6 +212,7 @@ Do not tick a box you have not personally verified.
 - [ ] Threshold confirmed at 2000 m with the business (3.4).
 - [ ] Ten sample Chennai locations tested end to end.
 - [ ] **Road distances manually validated against Google Maps** (3.8).
+- [ ] `/api/v1/routes/preview` returns independent Warehouse and Customer routes with road geometry, distance and duration.
 - [ ] Bootstrap admin password changed; real user accounts created with correct roles.
 - [ ] TLS live; HSTS enabled; API docs off (3.9).
 - [ ] Server key is absent from the frontend bundle; browser key is referrer-restricted (3.10).

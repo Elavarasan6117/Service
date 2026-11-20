@@ -245,7 +245,16 @@ class GoogleMapsProvider:
         if response.status_code >= 400:
             if response.status_code == 404 and ("geocode" in url or "places" in url):
                 raise GeocodingNoResultError("Google could not find that address.")
-            safe_message = str(error.get("message") or f"Google Maps returned HTTP {response.status_code}.")
+            google_message = str(error.get("message") or "No error message was returned.")
+            api_label = (
+                "Google Routes API" if url.startswith(_ROUTES_V2)
+                else "Google Maps Platform API"
+            )
+            safe_message = (
+                f"{api_label} returned HTTP {response.status_code} "
+                f"({error.get('status') or error.get('code') or 'HTTP_ERROR'}): "
+                f"{google_message}"
+            )
             if response.status_code == 401:
                 code = "PROVIDER_UNAUTHENTICATED"
             elif response.status_code == 403:

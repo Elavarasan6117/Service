@@ -491,6 +491,9 @@ async def test_google_routes_api_key_error_and_quota_error_are_classified():
     with pytest.raises(RoutingProviderError) as key_error:
         await provider.get_driving_routes(Coordinate(13.08, 80.27), Coordinate(13.09, 80.28))
     assert key_error.value.code == "PROVIDER_REQUEST_DENIED"
+    assert "HTTP 403" in str(key_error.value)
+    assert "PERMISSION_DENIED" in str(key_error.value)
+    assert "API key not valid" in str(key_error.value)
     with pytest.raises(RoutingRateLimitError) as quota_error:
         await provider.get_driving_routes(Coordinate(13.08, 80.27), Coordinate(13.09, 80.28))
     assert quota_error.value.code == "PROVIDER_QUOTA_EXCEEDED"

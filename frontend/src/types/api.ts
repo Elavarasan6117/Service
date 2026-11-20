@@ -197,8 +197,10 @@ export interface RoutePreviewOrigin {
   kind: RouteOriginKind
   latitude: number
   longitude: number
-  distanceMeters: number
+  distanceMeters: number | null
+  durationSeconds: number | null
   address: string | null
+  selectionBasis: 'ROAD_DISTANCE' | 'GEOGRAPHIC_FALLBACK' | string
 }
 
 export interface RoutePreview {

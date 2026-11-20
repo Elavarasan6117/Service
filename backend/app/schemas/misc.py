@@ -270,8 +270,10 @@ class PreviewOrigin(CamelModel):
     kind: str
     latitude: float
     longitude: float
-    distance_meters: int
+    distance_meters: int | None
+    duration_seconds: int | None = None
     address: str | None = None
+    selection_basis: str = "ROAD_DISTANCE"
 
 
 class PreviewRoute(CamelModel):
